@@ -1,0 +1,21 @@
+Tabular Q-Learning for European Call Option Hedging Under Transaction Costs
+============================================================================
+
+Key design choices in this version:
+  - RELATIVE action space: agent picks a position *change* from
+    {-1.0, -0.8, ..., 0.0, ..., +0.8, +1.0}, with 0.0 = "hold / don't trade".
+    Result clipped to [0, 1]. This makes the no-trade decision explicit.
+  - Reward scaling: step reward divided by K so Q-values are in percentage
+    terms rather than dollar terms, improving numerical stability.
+  - Log-normal GBM: S_next = S * exp((μ-σ²/2)Δt + σ√Δt Z), guaranteeing
+    positive prices (consistent with thesis Eq. 2).
+  - No risk-aversion penalty (c=0): the quadratic term was too aggressive
+    for tabular Q-learning and made results worse. The transaction cost
+    alone provides the incentive to avoid unnecessary trading.
+
+Retained improvements:
+  - Weekly time bins (52 instead of 252) → smaller Q-table
+  - Randomized starting spot [80, 120] → better state coverage
+  - Fast ε decay (1.0 → 0.02 over 10k episodes)
+  - Decaying learning rate (α: 0.05 → 0.01)
+  - Experience replay buffer
