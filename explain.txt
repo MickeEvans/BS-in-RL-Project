@@ -1,0 +1,334 @@
+section 2
+
+These are the textbook Black-Scholes formulas. bs_delta_vec tells you the optimal hedge ratio — 
+how many shares to hold per option. bs_price_scalar tells you the fair price of the option. 
+We compute V0 once at the start — that's the premium the writer (us) collects when they sell the option,
+ ~$7.97 in our setup.
+ 
+ "Key teaching point: "Note the _vec suffix — this version is vectorized. 
+ We can pass an array of 5,000 stock prices and it computes 5,000 deltas at once. T
+ hat's how we evaluate policies on thousands of paths in paralle
+
+
+ State Space design
+
+
+ What to say: "This is the most important design decision in the whole project. 
+ We have to convert continuous market state into discrete buckets so we can use a Q-table. 
+ Three dimensions:
+
+Time bins — finer near expiry because that's where things change fastest. Notice the spacing: 0–5 days is one bin, but 175–215 is a single bin too. Near expiry the option's delta changes quickly with stock price (gamma is high), so we need more resolution there.
+Moneyness S/K — also finer near 1.0 (at-the-money) because that's where the option value curves the most.
+Position error — this is the key insight. Instead of tracking 'what's my raw position?', we track 'how far am I from the Black-Scholes target?'. This collapses the hedge decision to one dimension: if the error is small, do nothing; if large, trade to reduce it.
+
+The actions are 7 possible position changes. We have small adjustments (±2.5%, ±8%) for fine corrections, big ones (±20%) for snap-backs after price jumps, and crucially 0.0 — do nothing. Without that, no no-trade band is possible."
+
+This function takes a continuous (price, position, time) and gives back the three integer bucket indices, plus the BS delta for use in the reward later.
+ The total state space is 10 × 9 × 9 = 810 states, times 7 actions = 5,670 Q-values to learn. Tiny — a deep network would be massive overkill here
+
+ Section 4
+
+ Standard geometric Brownian motion simulation. Each step the stock either goes up or down according to a log-normal distribution. We generate n_paths independent worlds in parallel — a 5000×253 array of stock prices.
+
+
+Section 5 Hedge simulator
+
+ There are three simulators (sim_Q, sim_bs, sim_band) — they all follow the same accounting structure.
+What to say: "All three follow the same pattern. We're tracking the writer's P&L:
+
+Start with cash = V0 (we collected the option premium).
+At each step: choose a new position (the policy differs here), buy/sell stock, pay transaction costs.
+At maturity: liquidate the remaining stock, pay the option payoff to the holder.
+
+The only thing that differs between the three is how new_pos is chosen:
+
+sim_bs rebalances to BS delta every single step
+sim_band only rebalances if |pos − delta| > half_width
+sim_Q looks up the action in the Q-table and applies it"
+
+Key teaching point: "The terminal P&L is the writer's profit. Negative is bad — it means the writer lost money. 
+BS gets a mean P&L of −6, meaning they paid $6 in costs that ate their entire premium plus some."
+
+Section 6:Metrics
+
+Computes everything we care about from a P&L vector:
+
+mean_pnl — average outcome across paths
+std_pnl — hedging risk — how much P&L varies across paths
+mean_tc — average transaction costs
+sharpe — risk-adjusted return
+CVaR_5 — average P&L in the worst 5% of paths — captures tail risk, which Sharpe misses
+
+Section 7
+
+This is a critical trick. Cold-starting Q-learning from zeros means the agent has no idea what to do — it would take 200,000+ episodes to converge.
+Instead, we seed the Q-table with a heuristic: 'I think actions that reduce position error are good, with a small penalty for trading.'
+It's not the correct Q-function — it has no idea about transaction costs or expiry — but it gives the agent a sensible starting point.
+ After this, training only takes ~15,000 episodes. About 10× speedup, with no performance loss."
+
+ Section 8
+
+ (a) ε-greedy exploration. With probability ε, pick a random action; otherwise, pick the best one we know about. 
+ ε starts at 0.4 (lots of exploration) and decays to 0.03 (mostly exploit). This is how we balance trying new things vs using what we've learned.
+(b) The reward function — this is where the magic is. Three terms:
+
+-κ · |trade| · S — punishes transaction costs. Bigger trades hurt more.
+-λ · (pos − δ)² · S² · σ² · dt — punishes mis-hedging. This comes from a 1997 paper by Whalley & Wilmott. 
+The intuition: if you're 5% off the BS hedge, your P&L will fluctuate by an amount proportional to that. 
+We punish the expected variance directly.
+At the last step: subtract the option payoff max(Sₜ − K, 0). This makes the agent care about the final outcome.
+
+The hyperparameter λ is everything. Low λ → agent ignores risk, just minimizes costs (results in not section 2
+
+These are the textbook Black-Scholes formulas. bs_delta_vec tells you the optimal hedge ratio — 
+how many shares to hold per option. bs_price_scalar tells you the fair price of the option. 
+We compute V0 once at the start — that's the premium the writer (us) collects when they sell the option,
+ ~$7.97 in our setup.
+ 
+ "Key teaching point: "Note the _vec suffix — this version is vectorized. 
+ We can pass an array of 5,000 stock prices and it computes 5,000 deltas at once. T
+ hat's how we evaluate policies on thousands of paths in paralle
+
+
+ State Space design
+
+
+ What to say: "This is the most important design decision in the whole project. 
+ We have to convert continuous market state into discrete buckets so we can use a Q-table. 
+ Three dimensions:
+
+Time bins — finer near expiry because that's where things change fastest. Notice the spacing: 0–5 days is one bin, but 175–215 is a single bin too. Near expiry the option's delta changes quickly with stock price (gamma is high), so we need more resolution there.
+Moneyness S/K — also finer near 1.0 (at-the-money) because that's where the option value curves the most.
+Position error — this is the key insight. Instead of tracking 'what's my raw position?', we track 'how far am I from the Black-Scholes target?'. This collapses the hedge decision to one dimension: if the error is small, do nothing; if large, trade to reduce it.
+
+The actions are 7 possible position changes. We have small adjustments (±2.5%, ±8%) for fine corrections, big ones (±20%) for snap-backs after price jumps, and crucially 0.0 — do nothing. Without that, no no-trade band is possible."
+
+This function takes a continuous (price, position, time) and gives back the three integer bucket indices, plus the BS delta for use in the reward later.
+ The total state space is 10 × 9 × 9 = 810 states, times 7 actions = 5,670 Q-values to learn. Tiny — a deep network would be massive overkill here
+
+ Section 4
+
+ Standard geometric Brownian motion simulation. Each step the stock either goes up or down according to a log-normal distribution. We generate n_paths independent worlds in parallel — a 5000×253 array of stock prices.
+
+
+Section 5 Hedge simulator
+
+ There are three simulators (sim_Q, sim_bs, sim_band) — they all follow the same accounting structure.
+What to say: "All three follow the same pattern. We're tracking the writer's P&L:
+
+Start with cash = V0 (we collected the option premium).
+At each step: choose a new position (the policy differs here), buy/sell stock, pay transaction costs.
+At maturity: liquidate the remaining stock, pay the option payoff to the holder.
+
+The only thing that differs between the three is how new_pos is chosen:
+
+sim_bs rebalances to BS delta every single step
+sim_band only rebalances if |pos − delta| > half_width
+sim_Q looks up the action in the Q-table and applies it"
+
+Key teaching point: "The terminal P&L is the writer's profit. Negative is bad — it means the writer lost money. 
+BS gets a mean P&L of −6, meaning they paid $6 in costs that ate their entire premium plus some."
+
+Section 6:Metrics
+
+Computes everything we care about from a P&L vector:
+
+mean_pnl — average outcome across paths
+std_pnl — hedging risk — how much P&L varies across paths
+mean_tc — average transaction costs
+sharpe — risk-adjusted return
+CVaR_5 — average P&L in the worst 5% of paths — captures tail risk, which Sharpe misses
+
+Section 7
+
+This is a critical trick. Cold-starting Q-learning from zeros means the agent has no idea what to do — it would take 200,000+ episodes to converge.
+Instead, we seed the Q-table with a heuristic: 'I think actions that reduce position error are good, with a small penalty for trading.'
+It's not the correct Q-function — it has no idea about transaction costs or expiry — but it gives the agent a sensible starting point.
+ After this, training only takes ~15,000 episodes. About 10× speedup, with no performance loss."
+
+ Section 8
+
+ (a) ε-greedy exploration. With probability ε, pick a random action; otherwise, pick the best one we know about. 
+ ε starts at 0.4 (lots of exploration) and decays to 0.03 (mostly exploit). This is how we balance trying new things vs using what we've learned.
+(b) The reward function — this is where the magic is. Three terms:
+
+-κ · |trade| · S — punishes transaction costs. Bigger trades hurt more.
+-λ · (pos − δ)² · S² · σ² · dt — punishes mis-hedging. This comes from a 1997 paper by Whalley & Wilmott. 
+The intuition: if you're 5% off the BS hedge, your P&L will fluctuate by an amount proportional to that. 
+We punish the expected variance directly.
+At the last step: subtract the option payoff max(Sₜ − K, 0). This makes the agent care about the final outcome.
+
+The hyperparameter λ is everything. Low λ → agent ignores risk, just minimizes costs (results in not hedging). 
+High λ → agent ignores cost, hedges aggressively (becomes BS). Somewhere in between is optimal — we sweep this.
+(c) The Q-update. Standard Bellman equation: Q(s,a) ← Q(s,a) + α[r + γ·max Q(s', ·) − Q(s,a)]. 
+The learning rate α shrinks with the visit count, so well-explored cells stop changing — this gives stable convergence
+
+Double Q-learning
+
+What to say: "This is the famous Double Q-learning algorithm by Hasselt (2010). Standard Q-learning has a bias: because we take max over a noisy Q-table, we systematically overestimate values. Double Q fixes this by maintaining two tables. One picks the action, the other evaluates it. The biases cancel.
+Plot twist: in our problem, this doesn't help. We tested it and it's actually worse. Why? Three reasons:
+
+Each table only gets half the updates → effectively half the training budget.
+Our reward is mostly deterministic (TC and payoff aren't noisy), so there's not much overestimation bias to fix in the first place.
+Our warm start already gives sensible Q-values.
+
+This is a useful negative result — 'a standard improvement that doesn't transfer here.' 
+Worth showing in the thesis."
+
+Section 11
+
+We train on one set of paths but evaluate on a completely different set (different seed). 
+This is OOS testing, the gold standard. If our agent only memorized the training paths, it would fail here.
+The λ-sweep is how we find the right risk/cost trade-off. 
+We don't pick the highest Sharpe blindly — we pick the lowest TC subject to std ≤ BS std. This makes the comparison fair: 'at the same risk level, who trades less?'
+The 'extended training' step is fine-tuning. After the broad search finds a good λ, we polish that agent with a smaller learning rate and less exploration to lock in the policy.
+The Double Q step is the ablation. Same λ, same total episodes, just different update rule.
+
+Plots
+
+Figure 1 — Efficient Frontier. "This is the headline chart. X-axis is TC, Y-axis is risk. Lower-left is better — cheaper AND less risky. BS-delta sits in the top-right (high cost). The QL agents trace out a frontier between these extremes. Double-Q is way up on the right — the worst on both axes."
+Figure 2 — P&L distributions. "The histogram and box plot show how the methods differ. BS is a tight distribution centered at -6 (it eats the premium in fees). QL is a wider distribution but centered closer to zero — it sometimes profits, occasionally loses big, but on average loses less."
+Figure 3 — Learned policy heat-map. "This is the satisfying chart. Each panel is one time bucket. X-axis is moneyness, Y-axis is position error. Red means buy, blue means sell, white means do nothing. The white band around y=0 is the no-trade region the agent discovered on its own. It's the same structure that Hodges-Neuberger (1989) derived analytically — but our agent found it from scratch with no math."
+Figure 4 — Bar charts. "Side-by-side comparison of all five methods on the three metrics. Easy to read: lower bars are better in all panels. QL extended (navy) wins or ties on every metric except 'lowest possible TC' where the wide band wins.section 2
+
+These are the textbook Black-Scholes formulas. bs_delta_vec tells you the optimal hedge ratio — 
+how many shares to hold per option. bs_price_scalar tells you the fair price of the option. 
+We compute V0 once at the start — that's the premium the writer (us) collects when they sell the option,
+ ~$7.97 in our setup.
+ 
+ "Key teaching point: "Note the _vec suffix — this version is vectorized. 
+ We can pass an array of 5,000 stock prices and it computes 5,000 deltas at once. T
+ hat's how we evaluate policies on thousands of paths in paralle
+
+
+ State Space design
+
+
+ What to say: "This is the most important design decision in the whole project. 
+ We have to convert continuous market state into discrete buckets so we can use a Q-table. 
+ Three dimensions:
+
+Time bins — finer near expiry because that's where things change fastest. Notice the spacing: 0–5 days is one bin, but 175–215 is a single bin too. Near expiry the option's delta changes quickly with stock price (gamma is high), so we need more resolution there.
+Moneyness S/K — also finer near 1.0 (at-the-money) because that's where the option value curves the most.
+Position error — this is the key insight. Instead of tracking 'what's my raw position?', we track 'how far am I from the Black-Scholes target?'. This collapses the hedge decision to one dimension: if the error is small, do nothing; if large, trade to reduce it.
+
+The actions are 7 possible position changes. We have small adjustments (±2.5%, ±8%) for fine corrections, big ones (±20%) for snap-backs after price jumps, and crucially 0.0 — do nothing. Without that, no no-trade band is possible."
+
+This function takes a continuous (price, position, time) and gives back the three integer bucket indices, plus the BS delta for use in the reward later.
+ The total state space is 10 × 9 × 9 = 810 states, times 7 actions = 5,670 Q-values to learn. Tiny — a deep network would be massive overkill here
+
+ Section 4
+
+ Standard geometric Brownian motion simulation. Each step the stock either goes up or down according to a log-normal distribution. We generate n_paths independent worlds in parallel — a 5000×253 array of stock prices.
+
+
+Section 5 Hedge simulator
+
+ There are three simulators (sim_Q, sim_bs, sim_band) — they all follow the same accounting structure.
+What to say: "All three follow the same pattern. We're tracking the writer's P&L:
+
+Start with cash = V0 (we collected the option premium).
+At each step: choose a new position (the policy differs here), buy/sell stock, pay transaction costs.
+At maturity: liquidate the remaining stock, pay the option payoff to the holder.
+
+The only thing that differs between the three is how new_pos is chosen:
+
+sim_bs rebalances to BS delta every single step
+sim_band only rebalances if |pos − delta| > half_width
+sim_Q looks up the action in the Q-table and applies it"
+
+Key teaching point: "The terminal P&L is the writer's profit. Negative is bad — it means the writer lost money. 
+BS gets a mean P&L of −6, meaning they paid $6 in costs that ate their entire premium plus some."
+
+Section 6:Metrics
+
+Computes everything we care about from a P&L vector:
+
+mean_pnl — average outcome across paths
+std_pnl — hedging risk — how much P&L varies across paths
+mean_tc — average transaction costs
+sharpe — risk-adjusted return
+CVaR_5 — average P&L in the worst 5% of paths — captures tail risk, which Sharpe misses
+
+Section 7
+
+This is a critical trick. Cold-starting Q-learning from zeros means the agent has no idea what to do — it would take 200,000+ episodes to converge.
+Instead, we seed the Q-table with a heuristic: 'I think actions that reduce position error are good, with a small penalty for trading.'
+It's not the correct Q-function — it has no idea about transaction costs or expiry — but it gives the agent a sensible starting point.
+ After this, training only takes ~15,000 episodes. About 10× speedup, with no performance loss."
+
+ Section 8
+
+ (a) ε-greedy exploration. With probability ε, pick a random action; otherwise, pick the best one we know about. 
+ ε starts at 0.4 (lots of exploration) and decays to 0.03 (mostly exploit). This is how we balance trying new things vs using what we've learned.
+(b) The reward function — this is where the magic is. Three terms:
+
+-κ · |trade| · S — punishes transaction costs. Bigger trades hurt more.
+-λ · (pos − δ)² · S² · σ² · dt — punishes mis-hedging. This comes from a 1997 paper by Whalley & Wilmott. 
+The intuition: if you're 5% off the BS hedge, your P&L will fluctuate by an amount proportional to that. 
+We punish the expected variance directly.
+At the last step: subtract the option payoff max(Sₜ − K, 0). This makes the agent care about the final outcome.
+
+The hyperparameter λ is everything. Low λ → agent ignores risk, just minimizes costs (results in not hedging). 
+High λ → agent ignores cost, hedges aggressively (becomes BS). Somewhere in between is optimal — we sweep this.
+(c) The Q-update. Standard Bellman equation: Q(s,a) ← Q(s,a) + α[r + γ·max Q(s', ·) − Q(s,a)]. 
+The learning rate α shrinks with the visit count, so well-explored cells stop changing — this gives stable convergence
+
+Double Q-learning
+
+What to say: "This is the famous Double Q-learning algorithm by Hasselt (2010). Standard Q-learning has a bias: because we take max over a noisy Q-table, we systematically overestimate values. Double Q fixes this by maintaining two tables. One picks the action, the other evaluates it. The biases cancel.
+Plot twist: in our problem, this doesn't help. We tested it and it's actually worse. Why? Three reasons:
+
+Each table only gets half the updates → effectively half the training budget.
+Our reward is mostly deterministic (TC and payoff aren't noisy), so there's not much overestimation bias to fix in the first place.
+Our warm start already gives sensible Q-values.
+
+This is a useful negative result — 'a standard improvement that doesn't transfer here.' 
+Worth showing in the thesis."
+
+Section 11
+
+We train on one set of paths but evaluate on a completely different set (different seed). 
+This is OOS testing, the gold standard. If our agent only memorized the training paths, it would fail here.
+The λ-sweep is how we find the right risk/cost trade-off. 
+We don't pick the highest Sharpe blindly — we pick the lowest TC subject to std ≤ BS std. This makes the comparison fair: 'at the same risk level, who trades less?'
+The 'extended training' step is fine-tuning. After the broad search finds a good λ, we polish that agent with a smaller learning rate and less exploration to lock in the policy.
+The Double Q step is the ablation. Same λ, same total episodes, just different update rule.
+
+Plots
+
+Figure 1 — Efficient Frontier. "This is the headline chart. X-axis is TC, Y-axis is risk. Lower-left is better — cheaper AND less risky. BS-delta sits in the top-right (high cost). The QL agents trace out a frontier between these extremes. Double-Q is way up on the right — the worst on both axes."
+Figure 2 — P&L distributions. "The histogram and box plot show how the methods differ. BS is a tight distribution centered at -6 (it eats the premium in fees). QL is a wider distribution but centered closer to zero — it sometimes profits, occasionally loses big, but on average loses less."
+Figure 3 — Learned policy heat-map. "This is the satisfying chart. Each panel is one time bucket. X-axis is moneyness, Y-axis is position error. Red means buy, blue means sell, white means do nothing. The white band around y=0 is the no-trade region the agent discovered on its own. It's the same structure that Hodges-Neuberger (1989) derived analytically — but our agent found it from scratch with no math."
+Figure 4 — Bar charts. "Side-by-side comparison of all five methods on the three metrics. Easy to read: lower bars are better in all panels. QL extended (navy) wins or ties on every metric except 'lowest possible TC' where the wide band wins.). 
+High λ → agent ignores cost, hedges aggressively (becomes BS). Somewhere in between is optimal — we sweep this.
+(c) The Q-update. Standard Bellman equation: Q(s,a) ← Q(s,a) + α[r + γ·max Q(s', ·) − Q(s,a)]. 
+The learning rate α shrinks with the visit count, so well-explored cells stop changing — this gives stable convergence
+
+Double Q-learning
+
+What to say: "This is the famous Double Q-learning algorithm by Hasselt (2010). Standard Q-learning has a bias: because we take max over a noisy Q-table, we systematically overestimate values. Double Q fixes this by maintaining two tables. One picks the action, the other evaluates it. The biases cancel.
+Plot twist: in our problem, this doesn't help. We tested it and it's actually worse. Why? Three reasons:
+
+Each table only gets half the updates → effectively half the training budget.
+Our reward is mostly deterministic (TC and payoff aren't noisy), so there's not much overestimation bias to fix in the first place.
+Our warm start already gives sensible Q-values.
+
+This is a useful negative result — 'a standard improvement that doesn't transfer here.' 
+Worth showing in the thesis."
+
+Section 11
+
+We train on one set of paths but evaluate on a completely different set (different seed). 
+This is OOS testing, the gold standard. If our agent only memorized the training paths, it would fail here.
+The λ-sweep is how we find the right risk/cost trade-off. 
+We don't pick the highest Sharpe blindly — we pick the lowest TC subject to std ≤ BS std. This makes the comparison fair: 'at the same risk level, who trades less?'
+The 'extended training' step is fine-tuning. After the broad search finds a good λ, we polish that agent with a smaller learning rate and less exploration to lock in the policy.
+The Double Q step is the ablation. Same λ, same total episodes, just different update rule.
+
+Plots
+
+Figure 1 — Efficient Frontier. "This is the headline chart. X-axis is TC, Y-axis is risk. Lower-left is better — cheaper AND less risky. BS-delta sits in the top-right (high cost). The QL agents trace out a frontier between these extremes. Double-Q is way up on the right — the worst on both axes."
+Figure 2 — P&L distributions. "The histogram and box plot show how the methods differ. BS is a tight distribution centered at -6 (it eats the premium in fees). QL is a wider distribution but centered closer to zero — it sometimes profits, occasionally loses big, but on average loses less."
+Figure 3 — Learned policy heat-map. "This is the satisfying chart. Each panel is one time bucket. X-axis is moneyness, Y-axis is position error. Red means buy, blue means sell, white means do nothing. The white band around y=0 is the no-trade region the agent discovered on its own. It's the same structure that Hodges-Neuberger (1989) derived analytically — but our agent found it from scratch with no math."
+Figure 4 — Bar charts. "Side-by-side comparison of all five methods on the three metrics. Easy to read: lower bars are better in all panels. QL extended (navy) wins or ties on every metric except 'lowest possible TC' where the wide band wins.
