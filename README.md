@@ -1,88 +1,158 @@
 # Risk-Sensitive Q-Learning for Option Hedging
 
-Tabular Q-learning that hedges a short European call under proportional transaction costs, and beats Black-Scholes delta rebalancing on the risk-adjusted objective `Y = E[cost] + 1.5·Std[cost]`.
+Tabular Q-learning agent that hedges a short European call option under proportional transaction costs. The agent discovers a no-trade band policy from scratch and beats the Black-Scholes delta-hedge benchmark on a risk-adjusted basis.
 
-Implements the Cao-Chen-Hull-Poulos (2021) dual-Q formulation plus a post-hoc no-trade bias at evaluation time. The learned policy is a discrete no-trade band around BS delta — exactly the theoretical structure from Davis-Panas-Zariphopoulou (1993).
+## Key results (20,000 out-of-sample paths)
 
-## Headline Result
+| Method | Mean P&L | Std P&L | Mean TC | CVaR 5% |
+|---|---:|---:|---:|---:|
+| BS-delta hedge | −6.08 | 2.27 | 6.07 | −9.90 |
+| No-trade band (hw=0.20) | −2.08 | 2.27 | 2.06 | −6.06 |
+| **Q-Learning (λ=0.3, extended)** | **−2.38** | **1.96** | **2.36** | **−6.05** |
 
-| Strategy | Mean $ | Std $ | CVaR-95% $ | **Y = Mean + 1.5·Std** | Trades/year |
-|---|---|---|---|---|---|
-| No hedge | 0.64 | 6.06 | 16.56 | 9.72 | 0 |
-| BS daily | 5.54 | 2.07 | 9.93 | 8.64 | 245 |
-| BS weekly | 2.81 | 1.59 | 6.70 | 5.19 | 49 |
-| BS biweekly | 2.18 | 1.78 | 6.59 | 4.84 | 25 |
-| **RL + no-trade bias** | **1.26** | **2.26** | **6.60** | **4.65** | **10** |
+Compared to Black-Scholes the Q-learning agent achieves **−61% transaction cost**, **−14% hedging risk**, and **+39% better tail risk**.
 
-European call option, K=100, T=1 year, σ=0.2, κ=1% proportional transaction cost, 10,000 Monte Carlo eval paths.
+---
 
-## Setup
+## Quick start
 
-All files should live in one folder. In a terminal from that folder:
+### 1. Install dependencies
 
-```
-pip install -r requirements.txt
+```bash
+pip install numpy scipy matplotlib
 ```
 
-Dependencies are pure NumPy/SciPy/matplotlib — no PyTorch, no GPU required. Runs on any laptop.
+Requires Python 3.9+.
 
-## How to Run
+### 2. Run the experiment
 
-**Start here:** open `final_run.ipynb` in VS Code (with the Jupyter extension installed) and run cells top-to-bottom. Takes ~90 seconds for the training step plus a few more for evaluation and plots. All figures render inline in the notebook and are also saved as PNG files in the folder.
-
-The other scripts are optional deep-dives:
-
-| File | What it does | Runtime |
-|---|---|---|
-| `final_run.ipynb` | **Main result.** Train + evaluate + produce all 5 thesis figures. | ~2 min |
-| `sweep_nt_bonus.py` | Shows how the no-trade-bias parameter affects the result. Discovers the 0.0005 sweet spot. | ~2 min |
-| `robust_sweep.py` | Trains 3 independent seeds, sweeps nt_bonus on each. Confirms robustness. | ~4 min |
-| `final_compare.py` | Compares Single CCHP vs Double CCHP at full scale (3 seeds × 2 algorithms). Saves progress to `dq_final_results.pkl` so you can interrupt and resume. | ~10 min |
-
-All scripts assume they're run from the folder they live in (so they can find `exp_framework.py` etc.). In VS Code, right-click the file and pick "Run Python File in Terminal", or open a terminal in the folder and `python sweep_nt_bonus.py`.
-
-## File Map
-
-```
-hedging_rl/
-├── README.md              ← this file
-├── requirements.txt       ← pip dependencies
-├── exp_framework.py       ← core library: CCHP dual-Q, BS utilities, env, eval
-├── double_cchp.py         ← Double-Q variant of CCHP (4 Q-tables)
-├── final_run.ipynb        ← main result notebook (START HERE)
-├── sweep_nt_bonus.py      ← no-trade-bias parameter sweep
-├── robust_sweep.py        ← 3-seed robustness check
-└── final_compare.py       ← Single vs Double CCHP comparison
+```bash
+python main.py
 ```
 
-Running the scripts produces these output files in the same folder (safe to delete and regenerate):
+This runs the full pipeline end-to-end 3:
 
-- `final_training.png`, `final_histogram.png`, `final_frontier.png`, `final_trades.png`, `final_policy.png` — the thesis figures
-- `final_Q_tables.npz` — trained Q-tables (compressed)
-- `dq_final_results.pkl` — cached results from the Single-vs-Double comparison
+1. Evaluates the Black-Scholes delta-hedge benchmark
+2. Sweeps analytical no-trade band widths
+3. Trains Q-learning agents across 7 risk-aversion values λ
+4. Fine-tunes the best agent for another 30,000 episodes
+5. Trains a Double Q-Learning agent as ablation
+6. Tests all methods on 20,000 fresh out-of-sample paths
+7. Saves four result plots as PNG files
 
-## The Method in One Paragraph
+---
 
-The agent hedges a short call by choosing how much stock to hold at each daily timestep. State = `(time, moneyness, gap = position − BS_delta)`. Reward is the negative of the step's hedging cost (gains − transaction costs − option-value change). The CCHP innovation is to maintain **two** Q-functions: `Q1(s,a) = E[future cost]` and `Q2(s,a) = E[(future cost)²]`. The risk-adjusted policy minimizes `Q1 + c · sqrt(Q2 − Q1²)`. This is the only per-step bootstrapping scheme that correctly targets *cumulative* cost variance, which is what you want when hedging.
+## Project structure
 
-At evaluation time, a small bias `nt_bonus = 0.0005` is subtracted from the "do-nothing" action's Q-value. This breaks noisy ties in favor of holding, reducing over-trading from ~120 trades/year → ~10. This single intervention is what pushes the RL below the Black-Scholes benchmarks.
+```
+├── main.py            # Entry point — runs the full experiment
+├── config.py          # All tuneable parameters (edit this file)
+├── environment.py     # State space, action space, discretisation, path generation
+├── agent.py           # Q-learning training (single & double), warm start
+├── simulate.py        # Hedge simulators (BS, band, Q-policy) and metrics
+├── black_scholes.py   # Black-Scholes delta and pricing formulas
+└── plotting.py        # Result visualisation (4 figures)
+```
 
-## Configuration (edit in the notebook)
+### What each file does
+
+**`config.py`** — The only file you need to edit to experiment. Contains all market parameters (S₀, K, σ, κ, …), training hyperparameters (episode counts, λ-sweep values), and random seeds.
+
+**`environment.py`** — Defines the RL problem. The state has three dimensions:
+
+- **Time buckets** — finer near expiry where delta changes fastest
+- **Moneyness S/K** — finer near ATM where gamma is largest
+- **Position error (pos − δ_BS)** — the key design choice that lets the agent learn a no-trade band
+
+The action space is 7 discrete position changes: {−0.20, −0.08, −0.025, 0, +0.025, +0.08, +0.20}. Total state-action space: 10 × 9 × 9 × 7 = 5,670 cells.
+
+**`agent.py`** — Training logic. Contains the reward function (transaction cost penalty + Whalley-Wilmott variance penalty), the Bellman Q-update, and the BS-heuristic warm start that speeds convergence by ~10×. Also includes the Double Q-learning variant.
+
+**`simulate.py`** — Evaluates policies by simulating the option writer's P&L across thousands of GBM paths. All three simulators (BS-delta, no-trade band, Q-policy) share the same accounting: collect premium → trade at each step → pay costs → settle payoff at expiry.
+
+**`black_scholes.py`** — Vectorised BS delta and scalar BS pricing. Used throughout by the environment, simulators, and agent.
+
+**`plotting.py`** — Generates four figures: efficient frontier, P&L distributions, learned policy heatmap, and a bar-chart comparison.
+
+---
+
+## How to tweak parameters
+
+Open `config.py` and change whatever you like:
 
 ```python
-K, T, S0 = 100.0, 1.0, 100.0      # strike, maturity (years), spot
-sigma, r = 0.2, 0.0                # vol, risk-free rate
-dt, kappa = 1/252, 0.01            # daily steps, 1% transaction cost
-c_risk = 1.5                       # risk aversion
-nt_bonus = 0.0005                  # no-trade bias (try 0, 0.0005, 0.001)
-n_batches = 800                    # training batches (reduce for faster runs)
+# Try a different stock / strike setup
+S0    = 110.0
+K     = 100.0
+
+# Increase transaction costs
+kappa = 0.02
+
+# Train longer
+EPISODES_SWEEP = 30_000
+EPISODES_EXT   = 50_000
+
+# Test different risk-aversion values
+LAMBDA_SWEEP = [0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
 ```
 
-To see how the result degrades without the no-trade bias, set `nt_bonus = 0.0` and rerun the evaluation cell — the RL will over-trade and lose to BS weekly.
+Then re-run `python main.py`.
+
+For deeper changes to the state/action discretisation (bucket edges, action sizes), edit `environment.py` directly — see the `T_STEPS`, `M_EDGES`, `E_EDGES`, and `ACTIONS` arrays near the top.
+
+---
+
+## Using the code as a library
+
+All pieces are importable:
+
+```python
+import numpy as np
+from environment import N_T, N_M, N_E, N_A, sim_paths
+from agent import warm_init, train
+from simulate import sim_Q, mets
+
+# Allocate Q-table and visit counters
+Q = np.zeros((N_T, N_M, N_E, N_A))
+v = np.zeros_like(Q, dtype=int)
+
+# BS-heuristic warm start
+warm_init(Q)
+
+# Train 15,000 episodes with λ=0.3
+train(Q, v, n_episodes=15_000, risk_lambda=0.3,
+      eps_start=0.4, eps_end=0.03, seed=42)
+
+# Evaluate on 10,000 out-of-sample paths
+paths = sim_paths(10_000, seed=77777)
+pnl, tc, n_trades = sim_Q(Q, paths)
+m = mets(pnl, tc, n_trades, "my-agent")
+print(f"Sharpe: {m['sharpe']:.3f}, TC: {m['mean_tc']:.3f}")
+```
+
+---
+
+## Output plots
+
+| Figure | Content |
+|---|---|
+| `frontier.png` | Efficient frontier — hedging risk vs transaction cost |
+| `pnl_distributions.png` | P&L histogram + box plot for all methods |
+| `policy_heatmap.png` | Learned actions across moneyness × position error (shows the discovered no-trade band) |
+| `oos_comparison.png` | Bar charts comparing all methods on std, TC, and CVaR |
+
+---
+
+## Reproducibility
+
+All random seeds are set explicitly. The evaluation set uses `seed=77777` and the out-of-sample set uses `seed=99999`. You should get identical numbers given the same NumPy version across platforms.
+
+---
 
 ## References
 
-- Cao, Chen, Hull, Poulos (2021). *Deep Hedging of Derivatives Using Reinforcement Learning*. Journal of Financial Data Science, 3(1), 10-27. — The dual-Q formulation (their eq. 9-10).
-- van Hasselt (2010). *Double Q-learning*. NeurIPS. — The overestimation-bias correction used in the optional Double CCHP variant.
-- Davis, Panas, Zariphopoulou (1993). *European option pricing with transaction costs*. SIAM J. Control Optim, 31(2), 470-493. — The analytical no-trade band our agent empirically rediscovers.
-- Hodges, Neuberger (1989). *Optimal replication of contingent claims under transaction costs*. Review of Futures Markets, 8, 222-239.
+- Hodges, S. D. & Neuberger, A. (1989). *Optimal replication of contingent claims under transactions costs.*
+- Davis, M., Panas, V. G. & Zariphopoulou, T. (1993). *European option pricing with transaction costs.*
+- Whalley, A. E. & Wilmott, P. (1997). *An asymptotic analysis of an optimal hedging model for option pricing with transaction costs.*
+- Hasselt, H. (2010). *Double Q-learning.*
+- Cao, J., Chen, J., Hull, J. & Poulos, Z. (2021). *Deep hedging of derivatives using reinforcement learning.*
