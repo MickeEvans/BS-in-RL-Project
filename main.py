@@ -1,255 +1,214 @@
 """
-Main entry point for the Q-learning hedging experiment.
-
-Run this single file end-to-end to train one or more Q-learning agents and
-produce the evaluation figures. Edit the CONFIG block below to control which
-agents to train and what hyperparameters to use.
+main.py — Run the RL hedging experiment
+========================================
+All tuneable parameters are defined in PARAMS below.
+Trains Q-learning and/or Double Q-learning agents at various c-values,
+benchmarks against Black-Scholes, and produces a 6-panel diagnostic plot.
 
 Usage:
-    python main.py
-
-This file orchestrates the other modules:
-    env.py          - hedging environment
-    qlearn.py       - tabular Q-learning agent
-    q_train.py      - training loop and benchmark evaluators
-    q_chunk.py      - chunked save/load training driver
-    q_compare.py    - final evaluation and figure generation
+    python main.py                     (interactive — shows plot)
+    MPLBACKEND=Agg python main.py      (headless  — console table only)
 """
-import os
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-from env import HedgingEnv
-from q_chunk import main as train_chunk, load
-from q_compare import (
-    evaluate_on_paths, make_q_action, bs_action, no_hedge_action,
-    metrics,
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+
+from environment import (
+    bs_benchmark, bs_quantised_benchmark,
+    extract_policy, bs_policy_grid,
+)
+from agents import QHedger, DoubleQHedger, train, evaluate
+
+warnings.filterwarnings("ignore")
+np.random.seed(42)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PARAMETERS — edit these to change the experiment
+# ═════════════════════════════════════════════════════════════════════════════
+PARAMS = dict(
+    # ── Market ───────────────────────────────────────────────────────────
+    S0    = 100.0,      # initial stock price
+    K     = 100.0,      # strike price (ATM)
+    T     = 1.0,        # maturity in years
+    N     = 252,        # trading days (rebalancing steps per episode)
+    sigma = 0.20,       # annual volatility
+    r     = 0.0,        # risk-free rate
+    kappa = 0.01,       # proportional transaction-cost half-spread
+
+    # ── State grid ───────────────────────────────────────────────────────
+    N_TIME  = 5,        # bins for time-to-maturity
+    N_MONEY = 15,       # bins for log-moneyness
+    M_LO    = -0.5,     # lower bound of log-moneyness grid
+    M_HI    =  0.5,     # upper bound of log-moneyness grid
+
+    # ── Action grid ──────────────────────────────────────────────────────
+    N_ACT = 5,          # number of discrete holdings in [-1, 0]
+                        # 5 → H ∈ {-1.0, -0.75, -0.5, -0.25, 0.0}
 )
 
+# ── Training / evaluation settings ──────────────────────────────────────────
+TRAIN_EPISODES = 30_000
+EVAL_EPISODES  = 5_000
 
-# =============================================================================
-# CONFIG -- edit these to control the experiment
-# =============================================================================
-
-# --- training budget ---------------------------------------------------------
-# Total number of episodes per agent. 100k takes ~10 minutes on CPU per agent.
-# Use 25000 for a quick test (~3 min/agent).
-EPISODES_PER_AGENT = 100000
-
-# Number of chunks the training is split into (purely a save-frequency knob).
-# More chunks = more checkpoint files on disk; same total work.
-NUM_CHUNKS = 2
-
-# --- agents to train ---------------------------------------------------------
-# Each entry: (checkpoint_name, kwargs for QAgent)
-# Set this list to whichever agents you want to train and compare.
-# To skip training of an agent that already has a saved checkpoint, comment it
-# out below (the comparison will still load existing checkpoints by name).
-
-AGENTS = [
-    # (name,            kwargs passed to QAgent)
-    ("q_baseline",      dict(risk_c=0.0)),
-    ("q_double",        dict(risk_c=0.0, double_q=True)),
-    ("q_c0.5",          dict(risk_c=0.5)),
-    ("q_c1.0",          dict(risk_c=1.0)),
-    ("q_c2.0",          dict(risk_c=2.0)),
+# ── Agent configurations to train ───────────────────────────────────────────
+# Each dict: agent class, Cao c-value, display name.
+# Set agent_class to DoubleQHedger to use double Q-learning instead.
+CONFIGS = [
+    dict(agent_class=QHedger, c=0.0, name="QL_c0",  label="QL   c=0   "),
+    dict(agent_class=QHedger, c=0.7, name="QL_c07", label="QL   c=0.7 "),
+    dict(agent_class=QHedger, c=1.5, name="QL_c15", label="QL   c=1.5 "),
+    dict(agent_class=QHedger, c=2.0, name="QL_c20", label="QL   c=2.0 "),
+    # Uncomment to add Double Q-learning agents:
+    # dict(agent_class=DoubleQHedger, c=4.0, name="DQL_c40", label="DQL  c=4.0"),
 ]
 
-# --- agent defaults (applied to every agent unless overridden in AGENTS) -----
-AGENT_DEFAULTS = dict(
-    state_dim=2,
-    tau_bins=11,
-    m_bins=11,
-    h_bins=11,
-    A=11,
-    alpha=0.005,
-    eps_decay_episodes=80000,
-    alpha_decay_episodes=None,
-    m_binning="uniform",
-)
 
-# --- environment defaults (the thesis setting) -------------------------------
-# These are fixed by the thesis; rarely need to change.
-ENV_PARAMS = dict(
-    S0=100.0,
-    K=100.0,
-    T=1.0,
-    N=252,
-    sigma=0.20,
-    r=0.0,
-    kappa=0.01,
-    reward_mode="apl",
-)
-
-# --- evaluation budget -------------------------------------------------------
-N_EVAL_PATHS = 3000
-
-# --- what to do --------------------------------------------------------------
-DO_TRAIN     = True   # set to False to skip training (use existing checkpoints)
-DO_EVALUATE  = True   # produce the table + main comparison figure
-DO_PARETO    = True   # produce the mean-variance Pareto figure
-OUTPUT_DIR   = "outputs"
-
-
-# =============================================================================
-# Execution
-# =============================================================================
-def train_all():
-    """Train every agent in AGENTS, in chunks of EPISODES_PER_AGENT / NUM_CHUNKS."""
-    chunk_size = EPISODES_PER_AGENT // NUM_CHUNKS
-    for name, overrides in AGENTS:
-        cfg = dict(AGENT_DEFAULTS)
-        cfg.update(overrides)
-        print("\n" + "=" * 70)
-        print(f"Training '{name}' for {EPISODES_PER_AGENT} episodes "
-              f"({NUM_CHUNKS} chunks of {chunk_size})")
-        print(f"  config: {cfg}")
-        print("=" * 70)
-        # First chunk starts fresh; subsequent chunks resume.
-        train_chunk(name, chunk_size, fresh=True, **cfg)
-        for _ in range(NUM_CHUNKS - 1):
-            train_chunk(name, chunk_size, fresh=False, **cfg)
-
-
-def evaluate_all():
-    """Evaluate every named agent on identical seeded paths, plus BS + no-hedge."""
-    env = HedgingEnv(**ENV_PARAMS)
-    p = env.option_premium
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    print("\n" + "=" * 70)
-    print(f"Evaluating on {N_EVAL_PATHS} identical seeded paths")
-    print("=" * 70)
-    print(f"Option premium: {p:.4f}")
-
-    results = {}
-    # Benchmarks
-    print("  evaluating BS delta...")
-    c, d, s, nt = evaluate_on_paths(env, bs_action, N_EVAL_PATHS)
-    results["BS delta"] = (c, d, s, nt)
-    print("  evaluating no-hedge...")
-    c, d, s, nt = evaluate_on_paths(env, no_hedge_action, N_EVAL_PATHS)
-    results["No hedge"] = (c, d, s, nt)
-
-    # Q-agents
-    for name, _ in AGENTS:
-        agent = load(name)
-        if agent is None:
-            print(f"  skip {name}: no checkpoint found")
-            continue
-        print(f"  evaluating {name}...")
-        c, d, s, nt = evaluate_on_paths(env, make_q_action(agent), N_EVAL_PATHS)
-        results[name] = (c, d, s, nt)
-
-    # Print table
-    print()
-    print(f"{'Strategy':<22} {'Mean':>7} {'Mean%':>7} {'Std':>7} {'Std%':>7} "
-          f"{'P95':>6} {'CVaR95':>7} {'sum|dH|':>8} {'#trades':>8}")
-    print("-" * 100)
-    for label, (c, d, s, nt) in results.items():
-        m = metrics(c, p)
-        print(f"{label:<22} {m['mean']:>7.3f} {m['mean_pct']:>6.2f}% "
-              f"{m['std']:>7.3f} {m['std_pct']:>6.2f}% "
-              f"{m['p95']:>6.2f} {m['cvar95']:>7.2f} "
-              f"{float(np.mean(d)):>8.2f} {float(np.mean(nt)):>8.2f}")
-
-    # Make comparison figure
-    make_comparison_figure(results, p)
-    return results
-
-
-def make_comparison_figure(results, premium):
-    """Hedge cost histogram + mean-std scatter."""
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-
-    # Histogram
-    ax = axes[0]
-    all_costs = np.concatenate([c for c, _, _, _ in results.values()])
-    bins = np.linspace(all_costs.min() - 1,
-                       np.percentile(all_costs, 99) + 1, 60)
-    for label, (c, _, _, _) in results.items():
-        ax.hist(c, bins=bins, alpha=0.5, label=label, density=True)
-    ax.axvline(0, color="black", lw=0.6, ls="--")
-    ax.set_xlabel("Hedge cost")
-    ax.set_ylabel("Density")
-    ax.set_title(f"Hedge cost distribution ({N_EVAL_PATHS} paths)")
-    ax.legend(fontsize=8)
-
-    # Mean-Std scatter
-    ax = axes[1]
-    for label, (c, _, _, _) in results.items():
-        ax.scatter(np.std(c), np.mean(c), s=110, edgecolor="black",
-                   linewidth=0.7, label=label)
-        ax.annotate(label, (np.std(c), np.mean(c)),
-                    xytext=(7, 7), textcoords="offset points", fontsize=8)
-    ax.set_xlabel("Std of hedge cost")
-    ax.set_ylabel("Mean hedge cost")
-    ax.set_title("Mean-Std tradeoff (lower-left = better)")
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    out = os.path.join(OUTPUT_DIR, "comparison.png")
-    fig.savefig(out, dpi=140, bbox_inches="tight")
-    print(f"\nSaved comparison figure to {out}")
-
-
-def make_pareto_figure(results):
-    """Plot mean vs std with all Q-agents and BS / no-hedge highlighted."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    # Q-agents (by name, in the order of AGENTS)
-    q_xs, q_ys, q_labels = [], [], []
-    for name, _ in AGENTS:
-        if name in results:
-            c = results[name][0]
-            q_xs.append(float(np.std(c)))
-            q_ys.append(float(np.mean(c)))
-            q_labels.append(name)
-
-    ax.plot(q_xs, q_ys, "o-", color="C3", markersize=10, lw=1.5,
-            markeredgecolor="black", label="Q-learning variants")
-    for x, y, lab in zip(q_xs, q_ys, q_labels):
-        ax.annotate(lab, (x, y), xytext=(8, 6),
-                    textcoords="offset points", fontsize=9)
-
-    # BS
-    if "BS delta" in results:
-        c = results["BS delta"][0]
-        ax.scatter([np.std(c)], [np.mean(c)], s=180, marker="*",
-                   c="C0", edgecolor="black", zorder=4, label="BS delta")
-        ax.annotate("BS", (np.std(c), np.mean(c)),
-                    xytext=(-25, 6), textcoords="offset points", fontsize=10)
-
-    # No hedge
-    if "No hedge" in results:
-        c = results["No hedge"][0]
-        ax.scatter([np.std(c)], [np.mean(c)], s=120, marker="s",
-                   c="gray", edgecolor="black", zorder=4, label="No hedge")
-        ax.annotate("No hedge", (np.std(c), np.mean(c)),
-                    xytext=(-55, 6), textcoords="offset points", fontsize=9)
-
-    ax.set_xlabel("Std of hedge cost")
-    ax.set_ylabel("Mean hedge cost")
-    ax.set_title("Mean-variance Pareto frontier (lower-left = better)")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=9)
-    fig.tight_layout()
-    out = os.path.join(OUTPUT_DIR, "pareto.png")
-    fig.savefig(out, dpi=140, bbox_inches="tight")
-    print(f"Saved Pareto figure to {out}")
-
-
+# ═════════════════════════════════════════════════════════════════════════════
+# RUN
+# ═════════════════════════════════════════════════════════════════════════════
 def main():
-    if DO_TRAIN:
-        train_all()
-    results = None
-    if DO_EVALUATE:
-        results = evaluate_all()
-    if DO_PARETO and results is not None:
-        make_pareto_figure(results)
-    print("\nAll done.")
+    print("=" * 78)
+    print("RL Hedging  —  APL reward, no warm start")
+    print("=" * 78)
+
+    # ── BS benchmarks ────────────────────────────────────────────────────
+    print("\n[BS delta benchmark]")
+    bs_pnl, bs_tc, bs_tr = bs_benchmark(PARAMS, EVAL_EPISODES)
+    print("  TC=%.4f  std(PnL)=%.4f  mean(PnL)=%.4f  trades/ep=%.2f"
+          % (bs_tc.mean(), bs_pnl.std(), bs_pnl.mean(), bs_tr.mean()))
+
+    print("\n[BS quantised benchmark]")
+    bsq_pnl, bsq_tc, bsq_tr = bs_quantised_benchmark(PARAMS, EVAL_EPISODES)
+    print("  TC=%.4f  std(PnL)=%.4f  mean(PnL)=%.4f  trades/ep=%.2f"
+          % (bsq_tc.mean(), bsq_pnl.std(), bsq_pnl.mean(), bsq_tr.mean()))
+
+    # ── Train & evaluate each agent config ───────────────────────────────
+    agents, results = [], {}
+    for cfg in CONFIGS:
+        print("\n[Train %s]" % cfg["label"])
+        AgentClass = cfg["agent_class"]
+        ag = AgentClass(PARAMS, name=cfg["name"], c=cfg["c"])
+        train(ag, PARAMS, n_ep=TRAIN_EPISODES, gamma=1.0)
+        pnl, tc, tr = evaluate(ag, PARAMS, n_ep=EVAL_EPISODES)
+        results[cfg["name"]] = dict(pnl=pnl, tc=tc, trades=tr,
+                                    label=cfg["label"])
+        agents.append(ag)
+        print("  TC=%.4f  std(PnL)=%.4f  mean(PnL)=%.4f  trades/ep=%.2f"
+              "   (BS TC=%.4f, trades=%.1f)"
+              % (tc.mean(), pnl.std(), pnl.mean(), tr.mean(),
+                 bs_tc.mean(), bs_tr.mean()))
+
+    # ── Summary table ────────────────────────────────────────────────────
+    print("\n" + "=" * 78)
+    print("%-28s  %10s  %10s  %10s  %10s"
+          % ("Strategy", "Mean TC", "Std PnL", "Mean PnL", "Trades/ep"))
+    print("-" * 78)
+    print("%-28s  %10.4f  %10.4f  %10.4f  %10.2f"
+          % ("BS Delta", bs_tc.mean(), bs_pnl.std(),
+             bs_pnl.mean(), bs_tr.mean()))
+    print("%-28s  %10.4f  %10.4f  %10.4f  %10.2f"
+          % ("BS quantised", bsq_tc.mean(), bsq_pnl.std(),
+             bsq_pnl.mean(), bsq_tr.mean()))
+    for name, res in results.items():
+        print("%-28s  %10.4f  %10.4f  %10.4f  %10.2f"
+              % (res["label"][:28], res["tc"].mean(), res["pnl"].std(),
+                 res["pnl"].mean(), res["trades"].mean()))
+    print("=" * 78)
+
+    # ── 6-panel plot ─────────────────────────────────────────────────────
+    plot_results(bs_pnl, bs_tc, bsq_pnl, bsq_tc, results, agents, CONFIGS)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PLOTTING
+# ═════════════════════════════════════════════════════════════════════════════
+def plot_results(bs_pnl, bs_tc, bsq_pnl, bsq_tc, results, agents, configs):
+    fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    fig.suptitle("RL Hedging  —  APL reward, no warm start",
+                 fontsize=14, fontweight="bold")
+
+    palette = ["tomato", "darkorange", "green", "purple", "deeppink",
+               "teal", "brown", "olive"]
+
+    # ── PnL distribution ────────────────────────────────────────────────
+    ax = axes[0, 0]
+    ax.hist(bs_pnl, bins=70, alpha=0.55, label="BS Delta",
+            color="steelblue", density=True)
+    for (name, res), c in zip(results.items(), palette):
+        ax.hist(res["pnl"], bins=70, alpha=0.45, label=res["label"],
+                color=c, density=True)
+    ax.set_title("PnL distribution")
+    ax.set_xlabel("PnL"); ax.set_ylabel("Density")
+    ax.legend(fontsize=7)
+
+    # ── TC distribution ─────────────────────────────────────────────────
+    ax = axes[0, 1]
+    ax.hist(bs_tc, bins=70, alpha=0.55, label="BS Delta",
+            color="steelblue", density=True)
+    for (name, res), c in zip(results.items(), palette):
+        ax.hist(res["tc"], bins=70, alpha=0.45, label=res["label"],
+                color=c, density=True)
+    ax.set_title("Transaction-cost distribution")
+    ax.set_xlabel("TC"); ax.set_ylabel("Density")
+    ax.legend(fontsize=7)
+
+    # ── TC vs Risk scatter ──────────────────────────────────────────────
+    ax = axes[0, 2]
+    ax.scatter(bs_tc.mean(), bs_pnl.std(), s=200, marker="*",
+               color="steelblue", zorder=5, label="BS Delta")
+    ax.scatter(bsq_tc.mean(), bsq_pnl.std(), s=120, marker="P",
+               color="grey", zorder=5, label="BS quantised")
+    for (name, res), c in zip(results.items(), palette):
+        ax.scatter(res["tc"].mean(), res["pnl"].std(), s=90, marker="o",
+                   color=c, zorder=5, label=res["label"])
+    ax.set_title("TC  vs  Risk (Std PnL)")
+    ax.set_xlabel("Mean transaction cost"); ax.set_ylabel("Std(PnL)")
+    ax.legend(fontsize=6); ax.grid(True, alpha=0.3)
+
+    # ── Policy heatmaps (pick lowest-TC agent) ──────────────────────────
+    best_name = min(results, key=lambda k: results[k]["tc"].mean())
+    best_idx  = next(i for i, cfg in enumerate(configs)
+                     if cfg["name"] == best_name)
+    best_agent = agents[best_idx]
+    M_LO, M_HI = PARAMS["M_LO"], PARAMS["M_HI"]
+
+    ax = axes[1, 0]
+    im = ax.imshow(bs_policy_grid(PARAMS), origin="lower", aspect="auto",
+                   vmin=-1, vmax=0, cmap="RdYlGn",
+                   extent=[M_LO, M_HI, 0, 1])
+    ax.set_title("BS Hedge  H = −δ")
+    ax.set_xlabel("Log-Moneyness log(S/K)")
+    ax.set_ylabel("Time-to-Maturity τ/T")
+    plt.colorbar(im, ax=ax, label="H")
+
+    ax = axes[1, 1]
+    im = ax.imshow(extract_policy(best_agent, PARAMS),
+                   origin="lower", aspect="auto",
+                   vmin=-1, vmax=0, cmap="RdYlGn",
+                   extent=[M_LO, M_HI, 0, 1])
+    ax.set_title("RL Policy  (%s)" % best_agent.name)
+    ax.set_xlabel("Log-Moneyness log(S/K)")
+    ax.set_ylabel("Time-to-Maturity τ/T")
+    plt.colorbar(im, ax=ax, label="H")
+
+    ax = axes[1, 2]
+    diff = extract_policy(best_agent, PARAMS) - bs_policy_grid(PARAMS)
+    vmax = max(np.abs(diff).max(), 1e-6)
+    im = ax.imshow(diff, origin="lower", aspect="auto",
+                   vmin=-vmax, vmax=vmax, cmap="bwr",
+                   extent=[M_LO, M_HI, 0, 1])
+    ax.set_title("RL  −  BS Hedge")
+    ax.set_xlabel("Log-Moneyness log(S/K)")
+    ax.set_ylabel("Time-to-Maturity τ/T")
+    plt.colorbar(im, ax=ax, label="H diff")
+
+    plt.tight_layout()
+    plt.savefig("results.png", dpi=150)
+    print("\nPlot saved to results.png")
+    plt.show()
+    print("\nDone.")
 
 
 if __name__ == "__main__":
