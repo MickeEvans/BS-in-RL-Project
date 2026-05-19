@@ -6,6 +6,7 @@ Contains:
   - DoubleQHedger  : Double Q-learning    (thesis §2.4.4, Algorithm 3)
   - train()        : Training loop with geometric ε/α decay
   - evaluate()     : Greedy evaluation over n episodes
+                     (now also returns per-step hedging-error paths)
 
 Both agents use:
   - ε-greedy exploration (geometric decay during training)
@@ -124,8 +125,8 @@ def train(agent, params, n_ep=30000, gamma=1.0, verbose=True):
     for ep in range(n_ep):
         eps   *= eps_decay
         alpha *= alpha_decay
-        pnl, tc, _ = run_episode(agent, params, eps, alpha, gamma,
-                                 training=True)
+        pnl, tc, _, _ = run_episode(agent, params, eps, alpha, gamma,
+                                    training=True)
         log.append((pnl, tc))
 
         if verbose and (ep + 1) % (n_ep // 6) == 0:
@@ -143,12 +144,25 @@ def train(agent, params, n_ep=30000, gamma=1.0, verbose=True):
 # ─── Evaluation ─────────────────────────────────────────────────────────────
 
 def evaluate(agent, params, n_ep=5000):
-    """Run n_ep greedy episodes (no exploration, no learning)."""
+    """
+    Run n_ep greedy episodes (no exploration, no learning).
+
+    Returns
+    -------
+    pnls     : np.ndarray, shape (n_ep,)
+    tcs      : np.ndarray, shape (n_ep,)
+    trades   : np.ndarray, shape (n_ep,)
+    he_paths : np.ndarray, shape (n_ep, N+1)
+        Per-step hedging-error trajectories.
+    """
+    N = params["N"]
     pnls, tcs, trades = [], [], []
-    for _ in range(n_ep):
-        pnl, tc, nt = run_episode(agent, params, 0.0, 0.0, 1.0,
-                                  training=False)
+    he_paths = np.zeros((n_ep, N + 1))
+    for ep in range(n_ep):
+        pnl, tc, nt, he = run_episode(agent, params, 0.0, 0.0, 1.0,
+                                      training=False)
         pnls.append(pnl)
         tcs.append(tc)
         trades.append(nt)
-    return np.array(pnls), np.array(tcs), np.array(trades)
+        he_paths[ep] = he
+    return np.array(pnls), np.array(tcs), np.array(trades), he_paths
