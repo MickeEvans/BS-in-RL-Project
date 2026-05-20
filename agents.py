@@ -166,3 +166,71 @@ def evaluate(agent, params, n_ep=5000):
         trades.append(nt)
         he_paths[ep] = he
     return np.array(pnls), np.array(tcs), np.array(trades), he_paths
+
+
+# ─── Persistence: save / load Q-tables ──────────────────────────────────────
+
+def save_agents(agents, configs, directory="saved_agents"):
+    """
+    Save every agent's Q-table(s) to a .npz file in `directory`.
+
+    File naming: <directory>/<name>.npz
+    QHedger stores a single array "Q".
+    DoubleQHedger stores "Q1" and "Q2".
+    Also saves the config metadata (name, c, class name) as scalars so
+    load_agents() can reconstruct the right agent type without any
+    external config being passed.
+
+    Call this in main.py immediately after training.
+    """
+    import os
+    os.makedirs(directory, exist_ok=True)
+    for ag, cfg in zip(agents, configs):
+        path = os.path.join(directory, cfg["name"] + ".npz")
+        meta = dict(
+            agent_class = type(ag).__name__,   # "QHedger" or "DoubleQHedger"
+            name        = cfg["name"],
+            label       = cfg["label"],
+            c           = float(cfg["c"]),
+        )
+        if isinstance(ag, DoubleQHedger):
+            np.savez(path, Q1=ag.Q1, Q2=ag.Q2, **meta)
+        else:
+            np.savez(path, Q=ag.Q, **meta)
+    print("  Saved %d agent(s) to '%s/'" % (len(agents), directory))
+
+
+def load_agents(configs, params, directory="saved_agents"):
+    """
+    Load Q-tables from disk and return a list of reconstructed agents.
+
+    Expects one .npz file per config entry, named <directory>/<name>.npz.
+    The agent class is inferred from the stored metadata so the caller
+    only needs to pass the same CONFIGS list used during training.
+
+    Raises FileNotFoundError with a clear message if any file is missing,
+    so the user knows to run main.py first.
+    """
+    import os
+    agents = []
+    for cfg in configs:
+        path = os.path.join(directory, cfg["name"] + ".npz")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "Agent file not found: '%s'\n"
+                "Run main.py first to train and save agents." % path
+            )
+        data       = np.load(path, allow_pickle=False)
+        class_name = str(data["agent_class"])
+
+        if class_name == "DoubleQHedger":
+            ag = DoubleQHedger(params, name=cfg["name"], c=cfg["c"])
+            ag.Q1 = data["Q1"].copy()
+            ag.Q2 = data["Q2"].copy()
+        else:
+            ag = QHedger(params, name=cfg["name"], c=cfg["c"])
+            ag.Q = data["Q"].copy()
+
+        agents.append(ag)
+    print("  Loaded %d agent(s) from '%s/'" % (len(agents), directory))
+    return agents
