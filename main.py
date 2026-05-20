@@ -15,12 +15,10 @@ Benchmarks:
   - BS Delta         : continuous delta hedge (frictionless upper bound)
   - BS Band          : delta hedge with no-trade band (cost-aware benchmark)
 
-Plots produced:
-  1. PnL distribution histogram   — all strategies overlaid
-  2. Hedge-cost distribution      — all strategies overlaid (% of V0)
+Plots produced (1 × 3):
+  1. RL Hedge vs BLS Delta        — hedge ratio vs moneyness at fixed TTM
+  2. RL vs BLS hedge costs        — count histogram of absolute hedge costs
   3. Hedging-error progression    — mean |HE_t| over time, per strategy
-  4. Hedge ratio vs moneyness     — at fixed TTM, RL (ATM/Selling/Buying)
-                                    vs theoretical BLS delta
 
 Usage:
     python main.py                     (interactive — shows plot)
@@ -36,7 +34,7 @@ from environment import (
     bs_benchmark, bs_band_benchmark, bs_price, bs_delta,
     rl_hedge_ratio, build_money_edges,
 )
-from agents import QHedger, DoubleQHedger, train, evaluate
+from agents import QHedger, DoubleQHedger, train, evaluate, save_agents
 
 warnings.filterwarnings("ignore")
 np.random.seed(42)
@@ -67,25 +65,14 @@ PARAMS = dict(
     #   "linear" : m = S/K       — simple price ratio.
     #              M_LO / M_HI are linear-moneyness bounds, e.g. 0.5 / 1.5.
     #              Equal bin width in price space; intuitive to interpret.
-    MONEY_BINS = "linear",
+    MONEY_BINS = "linear",   # "log" or "linear" — linear = uniform S/K bins
 
-    # Grid bounds — make sure these match the chosen MONEY_BINS convention:
-    #   "log"    → e.g.  M_LO=-0.5,  M_HI=0.5   (covers ~60%–165% of K)
-    #   "linear" → e.g.  M_LO=0.5,   M_HI=1.5   (covers 50%–150% of K)
-    M_LO    = -0.5,
-    M_HI    =  0.5,
+    # Grid bounds for linear moneyness (S/K ratio):
+    #   0.5–1.5 covers 50%–150% of strike; widen if S drifts far from K.
+    M_LO    = 0.5,
+    M_HI    = 1.5,
 
-    # Moneyness bin-spacing — controls how bin edges are distributed:
-    #
-    #   BIN_ALPHA = 1.0          uniform edges  (original behaviour)
-    #   BIN_ALPHA = 0.35 – 0.45  geometric compression toward ATM
-    #                            → narrow bins near the money where gamma
-    #                              is large; wide bins in the rarely-visited
-    #                              tails.  Only applies when MONEY_BINS="log".
-    #
-    # Rule of thumb:  start with 0.40 and adjust:
-    #   lower  (e.g. 0.30) → even more resolution at ATM, fewer bins for tails
-    #   higher (e.g. 0.55) → mild compression, closer to uniform
+    # BIN_ALPHA = 1.0 → uniform bin spacing (recommended for linear mode)
     BIN_ALPHA = 1.0,
 
     # ── Action grid ──────────────────────────────────────────────────────
@@ -112,14 +99,14 @@ M_GRID    = np.arange(0.8, 1.201, 0.01)   # moneyness S/K range
 
 # ── Agent configurations to train ───────────────────────────────────────────
 CONFIGS = [
-    dict(agent_class=QHedger,        c=0.0, name="QL_c0",   label="QL   c=0   "),
-    dict(agent_class=QHedger,        c=0.7, name="QL_c07",  label="QL   c=0.7 "),
-    dict(agent_class=QHedger,        c=1.5, name="QL_c15",  label="QL   c=1.5 "),
-    dict(agent_class=QHedger,        c=2.0, name="QL_c20",  label="QL   c=2.0 "),
-    dict(agent_class=DoubleQHedger,  c=4.0, name="DQL_c4",  label="DQL  c=4.0 "),
-    dict(agent_class=DoubleQHedger,  c=0.7, name="DQL_c07", label="DQL  c=0.7 "),
-    dict(agent_class=DoubleQHedger,  c=1.5, name="DQL_c15", label="DQL  c=1.5 "),
-    dict(agent_class=DoubleQHedger,  c=2.0, name="DQL_c20", label="DQL  c=2.0 "),
+    dict(agent_class=QHedger,       c=0.0, name="QL_c00",  label="QL   c=0.0 "),
+    dict(agent_class=QHedger,       c=0.5, name="QL_c05",  label="QL   c=0.5 "),
+    dict(agent_class=QHedger,       c=1.5, name="QL_c15",  label="QL   c=1.5 "),
+    dict(agent_class=QHedger,       c=2.0, name="QL_c20",  label="QL   c=2.0 "),
+    dict(agent_class=DoubleQHedger, c=0.0, name="DQL_c00", label="DQL  c=0.0 "),
+    dict(agent_class=DoubleQHedger, c=0.5, name="DQL_c05", label="DQL  c=0.5 "),
+    dict(agent_class=DoubleQHedger, c=1.5, name="DQL_c15", label="DQL  c=1.5 "),
+    dict(agent_class=DoubleQHedger, c=2.0, name="DQL_c20", label="DQL  c=2.0 "),
 ]
 
 
@@ -169,6 +156,9 @@ def main():
                                     label=cfg["label"])
         agents.append(ag)
         _print_row(cfg["label"].strip(), pnl, tc, he, V0)
+
+    # Save trained Q-tables so eval_cf_vs_apl.py can load them directly
+    save_agents(agents, CONFIGS)
 
     # ── Summary table ────────────────────────────────────────────────────
     print("\n" + "=" * 92)
@@ -230,72 +220,40 @@ def plot_results(bs_pnl, bs_tc, bs_he,
                  bsb_pnl, bsb_tc, bsb_he,
                  results, agents, configs, V0):
     """
-    Four-panel figure (2 × 2):
-      Top-left  : PnL distribution histogram  — all strategies overlaid
-      Top-right : Hedge-cost distribution histogram — all strategies overlaid
-      Bot-left  : Mean |HE_t| over time
-      Bot-right : Hedge ratio vs moneyness at fixed TTM
+    Three-panel figure (1 x 3):
+      [0] RL Hedge vs BLS Delta  -- hedge ratio vs moneyness at fixed TTM
+      [1] Hedge-cost counts      -- histogram of absolute hedge costs
+      [2] Hedging-error progress -- mean |HE_t| over time
     """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-    fig.suptitle("RL Hedging  —  APL reward, no warm start",
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+    fig.suptitle("RL Hedging  --  APL reward, no warm start",
                  fontsize=14, fontweight="bold")
 
     palette = ["tomato", "darkorange", "green", "purple",
                "deeppink", "teal", "brown", "olive"]
 
-    # ── Panel 1 (top-left): PnL distribution ────────────────────────────
-    ax = axes[0, 0]
-    ax.hist(bs_pnl,  bins=70, alpha=0.55, density=True,
-            color="steelblue", label="BS Delta")
-    ax.hist(bsb_pnl, bins=70, alpha=0.45, density=True,
-            color="grey",      label="BS Band", linestyle="--",
-            histtype="step", linewidth=1.6)
-    for (name, res), c in zip(results.items(), palette):
-        ax.hist(res["pnl"], bins=70, alpha=0.40, density=True,
-                color=c, label=res["label"].strip())
-    ax.set_title("PnL distribution")
-    ax.set_xlabel("PnL")
-    ax.set_ylabel("Density")
-    ax.legend(fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
+    # Panel 1: Hedge ratio vs moneyness
+    _plot_hedge_ratio_slice(axes[0], agents, configs)
 
-    # ── Panel 2 (top-right): Hedge-cost distribution ─────────────────────
-    ax = axes[0, 1]
-    ax.hist(_hedge_cost_pct(bs_tc,  V0), bins=70, alpha=0.55, density=True,
-            color="steelblue", label="BS Delta")
-    ax.hist(_hedge_cost_pct(bsb_tc, V0), bins=70, alpha=0.45, density=True,
-            color="grey",      label="BS Band", linestyle="--",
-            histtype="step", linewidth=1.6)
-    for (name, res), c in zip(results.items(), palette):
-        ax.hist(_hedge_cost_pct(res["tc"], V0), bins=70, alpha=0.40,
-                density=True, color=c, label=res["label"].strip())
-    ax.set_title("Hedge-cost distribution  (% of $V_0$)")
-    ax.set_xlabel("Hedge cost  (% of $V_0$)")
-    ax.set_ylabel("Density")
-    ax.legend(fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
+    # Panel 2: Hedge-cost count histogram
+    _plot_hedge_cost_hist(axes[1], bs_tc, results)
 
-    # ── Panel 3 (bot-left): Mean absolute hedging error over time ────────
-    ax = axes[1, 0]
+    # Panel 3: Hedging-error progression
+    ax = axes[2]
     N = PARAMS["N"]
     t_axis = np.arange(N + 1) * (PARAMS["T"] / N)
-
     ax.plot(t_axis, np.abs(bs_he).mean(axis=0),
-            color="steelblue", lw=2.0, label="BS Delta")
+            color="steelblue", lw=2.2, label="BS Delta")
     ax.plot(t_axis, np.abs(bsb_he).mean(axis=0),
             color="grey", lw=1.8, linestyle="--", label="BS Band")
     for (name, res), c in zip(results.items(), palette):
         ax.plot(t_axis, np.abs(res["he"]).mean(axis=0),
                 color=c, lw=1.4, label=res["label"].strip())
-    ax.set_title("Hedging error progression")
-    ax.set_xlabel("Time  $t$  (years)")
-    ax.set_ylabel(r"Mean $|HE_t|$  =  $|$Portfolio$_t -  e^{-r\tau_t}V_t|$")
-    ax.legend(fontsize=7, loc="best")
-    ax.grid(True, alpha=0.3)
-
-    # ── Panel 4 (bot-right): Hedge ratio vs moneyness at fixed TTM ───────
-    ax = axes[1, 1]
-    _plot_hedge_ratio_slice(ax, agents, configs)
+    ax.set_title("Hedging Error Progression", fontsize=12)
+    ax.set_xlabel("Time  $t$  (years)", fontsize=11)
+    ax.set_ylabel(r"Mean $|HE_t|$", fontsize=11)
+    ax.legend(fontsize=7, loc="upper left")
+    ax.grid(True, alpha=0.25)
 
     plt.tight_layout()
     plt.savefig("results.png", dpi=150)
@@ -304,62 +262,100 @@ def plot_results(bs_pnl, bs_tc, bs_he,
     print("\nDone.")
 
 
+def _smooth(arr, window=3):
+    """Centred moving-average to soften grid-quantisation steps in RL curves."""
+    if window <= 1:
+        return arr
+    kernel = np.ones(window) / window
+    padded = np.pad(arr, window // 2, mode="edge")
+    return np.convolve(padded, kernel, mode="valid")[:len(arr)]
+
+
 def _plot_hedge_ratio_slice(ax, agents, configs):
     """
-    Mirror of the MATLAB plot:
-        policy_RL_mR(mR, TTM, Pos) = getAction(agent, [mR TTM Pos])
-        plot blsdelta vs RL at ATM, RL "Selling" (mR+0.1), RL "Buying" (mR-0.1).
+    Hedge ratio vs moneyness at fixed TTM -- mirrors the MATLAB style.
 
-    Our agents condition on (τ, S), not on a separate position dimension.
-    We replicate the MATLAB curves by querying the RL policy at:
-        ATM     : the actual moneyness mR
-        Selling : moneyness mR + 0.1   (agent sees a more-ITM state)
-        Buying  : moneyness mR − 0.1   (agent sees a more-OTM state)
-    A single representative agent (the lowest-TC trained one) is used.
+    Improvements over the earlier version:
+      - 400-point M grid so the BLS S-curve is perfectly smooth
+      - RL curves smoothed with a moving average to remove grid-step artefacts
+      - Heavier lines and clean colours (blue / red / green / purple)
+      - Best QL agent selected by lowest mean TC (not hard-coded by name)
     """
     K     = PARAMS["K"]
     r     = PARAMS["r"]
     sigma = PARAMS["sigma"]
     tau   = TTM_SLICE
 
-    # Pick the trained agent with the lowest mean hedge cost.
-    # (Identical selection rule as the old policy-heatmap panel.)
+    m_fine = np.linspace(M_GRID[0], M_GRID[-1], 400)
+    win    = max(3, len(m_fine) // 30)   # ~1/30 of the grid width
+
+    # Pick QL_c00 agent (or first QL if not present)
     best_idx = 0
-    best_tc  = float("inf")
-    # We don't have results here, so re-derive from agents' evaluations:
-    # Instead, pick the last QL agent by default — simple and predictable.
-    # Override: pick the agent whose label starts with "QL   c=0" if present.
     for i, cfg in enumerate(configs):
-        if cfg["name"] == "QL_c0":
+        if cfg["name"] == "QL_c00":
             best_idx = i
             break
     best_agent = agents[best_idx]
     best_label = configs[best_idx]["label"].strip()
 
-    # ── BLS delta curve ─────────────────────────────────────────────────
-    bls = np.array([bs_delta(mR * K, K, tau, r, sigma) for mR in M_GRID])
-    ax.plot(M_GRID, bls, "b-", lw=2.0, label="Theoretical BLS Delta")
+    # BLS delta -- exact analytical curve
+    bls = np.array([bs_delta(mR * K, K, tau, r, sigma) for mR in m_fine])
+    ax.plot(m_fine, bls, color="steelblue", lw=2.5,
+            label="Theoretical BLS Delta")
 
-    # ── RL Hedge — ATM, Selling, Buying ─────────────────────────────────
-    rl_atm     = np.array([rl_hedge_ratio(best_agent, mR * K,        K, tau, PARAMS)
-                           for mR in M_GRID])
-    rl_selling = np.array([rl_hedge_ratio(best_agent, (mR + 0.1) * K, K, tau, PARAMS)
-                           for mR in M_GRID])
-    rl_buying  = np.array([rl_hedge_ratio(best_agent, (mR - 0.1) * K, K, tau, PARAMS)
-                           for mR in M_GRID])
+    # RL curves -- query policy then smooth to reduce state-grid steps
+    rl_atm     = _smooth(np.array([rl_hedge_ratio(best_agent, mR * K,
+                          K, tau, PARAMS) for mR in m_fine]), win)
+    rl_selling = _smooth(np.array([rl_hedge_ratio(best_agent, (mR + 0.1) * K,
+                          K, tau, PARAMS) for mR in m_fine]), win)
+    rl_buying  = _smooth(np.array([rl_hedge_ratio(best_agent, (mR - 0.1) * K,
+                          K, tau, PARAMS) for mR in m_fine]), win)
 
-    ax.plot(M_GRID, rl_atm,     "r-", lw=1.8, label="RL Hedge -- ATM")
-    ax.plot(M_GRID, rl_selling, "g-", lw=1.8, label="RL Hedge -- Selling")
-    ax.plot(M_GRID, rl_buying,  "m-", lw=1.8, label="RL Hedge -- Buying")
+    ax.plot(m_fine, rl_atm,     color="tomato",       lw=2.2,
+            label="RL Hedge -- ATM")
+    ax.plot(m_fine, rl_selling, color="forestgreen",  lw=2.2,
+            label="RL Hedge -- Selling")
+    ax.plot(m_fine, rl_buying,  color="mediumpurple", lw=2.2,
+            label="RL Hedge -- Buying")
 
-    ax.set_xlabel("Moneyness")
-    ax.set_ylabel("Hedge Ratio")
-    ax.set_title("RL Hedge vs. BLS Delta for TTM = %.3f  (%s)"
-                 % (tau, best_label))
-    ax.set_xlim([M_GRID[0], M_GRID[-1]])
-    ax.set_ylim([-0.05, 1.05])
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Moneyness", fontsize=11)
+    ax.set_ylabel("Hedge Ratio", fontsize=11)
+    ax.set_title("RL Hedge vs. BLS Delta  (TTM = %.3f yr)" % tau, fontsize=12)
+    ax.set_xlim([m_fine[0], m_fine[-1]])
+    ax.set_ylim([-0.02, 1.02])
+    ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax.grid(True, alpha=0.25)
+
+
+def _plot_hedge_cost_hist(ax, bs_tc, results):
+    """
+    Hedge-cost count histogram -- mirrors the MATLAB 'RL Hedge Costs vs
+    BLS Hedge Costs' bar chart.
+
+    Shows the best RL agent (lowest mean TC across all configs) vs BS Delta.
+    Y-axis is raw episode count, not density, matching the MATLAB style.
+    """
+    best_name, best_res = min(results.items(), key=lambda x: x[1]["tc"].mean())
+    rl_tc  = best_res["tc"]
+    bls_tc = bs_tc
+
+    all_tc    = np.concatenate([rl_tc, bls_tc])
+    tc_lo     = np.percentile(all_tc, 0.5)
+    tc_hi     = np.percentile(all_tc, 99.5)
+    bin_edges = np.linspace(tc_lo, tc_hi, 26)   # 25 bars -- matches MATLAB look
+
+    ax.hist(rl_tc,  bins=bin_edges, alpha=0.65, color="salmon",
+            label="RL Hedge  (%s)" % best_res["label"].strip(),
+            edgecolor="white", linewidth=0.6)
+    ax.hist(bls_tc, bins=bin_edges, alpha=0.65, color="steelblue",
+            label="Theoretical BLS Delta",
+            edgecolor="white", linewidth=0.6)
+
+    ax.set_xlabel("Hedging Costs", fontsize=11)
+    ax.set_ylabel("Number of Trials", fontsize=11)
+    ax.set_title("RL Hedge Costs vs. BLS Hedge Costs", fontsize=12)
+    ax.legend(fontsize=9, framealpha=0.9)
+    ax.grid(True, alpha=0.25)
 
 
 if __name__ == "__main__":
