@@ -10,7 +10,6 @@ Contains:
 
 Both agents use:
   - ε-greedy exploration (geometric decay during training)
-  - Cao c·R² variance penalty applied ONLY to the TD target
   - γ = 1 (finite horizon, no time preference)
   - Q-table initialised to zeros (no warm start)
 """
@@ -29,17 +28,13 @@ class QHedger:
 
     Q-update (thesis Eq. 32):
         Q(S,A) ← Q(S,A) + α [ R + γ·max_a Q(S',a) − Q(S,A) ]
-
-    The Cao c·R² regulariser is applied in the episode runner (environment.py)
-    before calling update().  c=0 gives the pure thesis APL reward.
     """
 
-    def __init__(self, params, name="QL", c=0.0):
+    def __init__(self, params, name="QL"):
         N_TIME  = params["N_TIME"]
         N_MONEY = params["N_MONEY"]
         N_ACT   = params["N_ACT"]
         self.name = name
-        self.c    = c
         self.Q    = np.zeros((N_TIME, N_MONEY, N_ACT))
 
     def act(self, tau, S, params, eps):
@@ -66,12 +61,11 @@ class DoubleQHedger:
     evaluates it, breaking the coupling that causes overestimation.
     """
 
-    def __init__(self, params, name="DQL", c=0.0):
+    def __init__(self, params, name="DQL"):
         N_TIME  = params["N_TIME"]
         N_MONEY = params["N_MONEY"]
         N_ACT   = params["N_ACT"]
         self.name = name
-        self.c    = c
         self.Q1   = np.zeros((N_TIME, N_MONEY, N_ACT))
         self.Q2   = np.zeros((N_TIME, N_MONEY, N_ACT))
 
@@ -177,7 +171,7 @@ def save_agents(agents, configs, directory="saved_agents"):
     File naming: <directory>/<name>.npz
     QHedger stores a single array "Q".
     DoubleQHedger stores "Q1" and "Q2".
-    Also saves the config metadata (name, c, class name) as scalars so
+    Also saves the config metadata (name, class name) as scalars so
     load_agents() can reconstruct the right agent type without any
     external config being passed.
 
@@ -191,7 +185,6 @@ def save_agents(agents, configs, directory="saved_agents"):
             agent_class = type(ag).__name__,   # "QHedger" or "DoubleQHedger"
             name        = cfg["name"],
             label       = cfg["label"],
-            c           = float(cfg["c"]),
         )
         if isinstance(ag, DoubleQHedger):
             np.savez(path, Q1=ag.Q1, Q2=ag.Q2, **meta)
@@ -224,11 +217,11 @@ def load_agents(configs, params, directory="saved_agents"):
         class_name = str(data["agent_class"])
 
         if class_name == "DoubleQHedger":
-            ag = DoubleQHedger(params, name=cfg["name"], c=cfg["c"])
+            ag = DoubleQHedger(params, name=cfg["name"])
             ag.Q1 = data["Q1"].copy()
             ag.Q2 = data["Q2"].copy()
         else:
-            ag = QHedger(params, name=cfg["name"], c=cfg["c"])
+            ag = QHedger(params, name=cfg["name"])
             ag.Q = data["Q"].copy()
 
         agents.append(ag)
