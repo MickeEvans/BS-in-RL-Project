@@ -2,8 +2,8 @@
 main.py — Run the RL hedging experiment
 ========================================
 All tuneable parameters are defined in PARAMS below.
-Trains Q-learning and/or Double Q-learning agents at various c-values,
-benchmarks against Black-Scholes, and produces diagnostic plots.
+Trains Q-learning and Double Q-learning agents, benchmarks against
+Black-Scholes, and produces diagnostic plots.
 
 Summary table reports:
   - Mean PnL
@@ -12,17 +12,18 @@ Summary table reports:
   - Mean terminal hedging error (Portfolio − discounted option value)
 
 Benchmarks:
-  - BS Delta         : continuous delta hedge (frictionless upper bound)
-  - BS Band          : delta hedge with no-trade band (cost-aware benchmark)
+  - BS Delta : continuous delta hedge (frictionless upper bound)
+  - BS Band  : delta hedge with no-trade band (cost-aware benchmark)
 
-Plots produced (1 × 3):
-  1. RL Hedge vs BLS Delta        — hedge ratio vs moneyness at fixed TTM
-  2. RL vs BLS hedge costs        — count histogram of absolute hedge costs
-  3. Hedging-error progression    — mean |HE_t| over time, per strategy
+Plots produced — each saved as a SEPARATE PNG file:
+  1. fig_ql_hedge_ratio.png   — QL  hedge ratio vs moneyness (ATM/Sell/Buy)
+  2. fig_dql_hedge_ratio.png  — DQL hedge ratio vs moneyness (ATM/Sell/Buy)
+  3. fig_hedge_costs.png      — RL (QL+DQL) vs BLS hedge-cost count histogram
+  4. fig_hedging_error.png    — mean |HE_t| over time, per strategy
 
 Usage:
-    python main.py                     (interactive — shows plot)
-    MPLBACKEND=Agg python main.py      (headless  — console table only)
+    python main.py                     (interactive — shows plots)
+    MPLBACKEND=Agg python main.py      (headless  — saves PNGs only)
 """
 
 import math
@@ -85,28 +86,21 @@ TRAIN_EPISODES = 30_000
 EVAL_EPISODES  = 5_000
 
 # ── No-trade band benchmark settings ────────────────────────────────────────
-# band_type : "fixed" — constant half-width = BAND_WIDTH (good for a sweep).
-#             "ww"    — Whalley–Wilmott analytical width (calibrated to C_BAND).
-# Tip: set band_type="ww" and C_BAND to the same c you use for RL agents so
-#      the WW band and the RL Cao objective share the same risk aversion.
+# band_type : "fixed" — constant half-width = BAND_WIDTH.
+#             "ww"    — Whalley–Wilmott analytical width (risk aversion C_BAND).
 BAND_TYPE  = "fixed"   # "fixed" or "ww"
 BAND_WIDTH = 0.10      # half-width used when BAND_TYPE="fixed"
-C_BAND     = 1.0       # risk-aversion inside the WW formula (band_type="ww")
+C_BAND     = 1.0       # risk-aversion inside the WW band formula (band_type="ww")
 
 # ── Moneyness-slice plot settings ───────────────────────────────────────────
 TTM_SLICE = 2.0 / 12.0          # time-to-maturity for the slice plot (months/12)
 M_GRID    = np.arange(0.8, 1.201, 0.01)   # moneyness S/K range
 
 # ── Agent configurations to train ───────────────────────────────────────────
+# One Q-learning and one Double Q-learning agent (no Cao penalty).
 CONFIGS = [
-    dict(agent_class=QHedger,       c=0.0, name="QL_c00",  label="QL   c=0.0 "),
-    dict(agent_class=QHedger,       c=0.5, name="QL_c05",  label="QL   c=0.5 "),
-    dict(agent_class=QHedger,       c=1.5, name="QL_c15",  label="QL   c=1.5 "),
-    dict(agent_class=QHedger,       c=2.0, name="QL_c20",  label="QL   c=2.0 "),
-    dict(agent_class=DoubleQHedger, c=0.0, name="DQL_c00", label="DQL  c=0.0 "),
-    dict(agent_class=DoubleQHedger, c=0.5, name="DQL_c05", label="DQL  c=0.5 "),
-    dict(agent_class=DoubleQHedger, c=1.5, name="DQL_c15", label="DQL  c=1.5 "),
-    dict(agent_class=DoubleQHedger, c=2.0, name="DQL_c20", label="DQL  c=2.0 "),
+    dict(agent_class=QHedger,       name="QL",  label="Q-Learning       "),
+    dict(agent_class=DoubleQHedger, name="DQL", label="Double Q-Learning"),
 ]
 
 
@@ -137,8 +131,8 @@ def main():
     bs_pnl, bs_tc, bs_tr, bs_he = bs_benchmark(PARAMS, EVAL_EPISODES)
     _print_row("BS Delta", bs_pnl, bs_tc, bs_he, V0)
 
-    print("\n[BS band benchmark  (type=%s  width=%.3f  c_band=%.2f)]"
-          % (BAND_TYPE, BAND_WIDTH, C_BAND))
+    print("\n[BS band benchmark  (type=%s  width=%.3f)]"
+          % (BAND_TYPE, BAND_WIDTH))
     bsb_pnl, bsb_tc, bsb_tr, bsb_he = bs_band_benchmark(
         PARAMS, EVAL_EPISODES,
         band_type=BAND_TYPE, band_width=BAND_WIDTH, c_band=C_BAND)
@@ -149,7 +143,7 @@ def main():
     for cfg in CONFIGS:
         print("\n[Train %s]" % cfg["label"])
         AgentClass = cfg["agent_class"]
-        ag = AgentClass(PARAMS, name=cfg["name"], c=cfg["c"])
+        ag = AgentClass(PARAMS, name=cfg["name"])
         train(ag, PARAMS, n_ep=TRAIN_EPISODES, gamma=1.0)
         pnl, tc, tr, he = evaluate(ag, PARAMS, n_ep=EVAL_EPISODES)
         results[cfg["name"]] = dict(pnl=pnl, tc=tc, trades=tr, he=he,
@@ -214,50 +208,50 @@ def _table_row(name, pnl, tc, he, V0):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# PLOTTING
+# PLOTTING — each plot is saved as a SEPARATE figure / PNG
 # ═════════════════════════════════════════════════════════════════════════════
 def plot_results(bs_pnl, bs_tc, bs_he,
                  bsb_pnl, bsb_tc, bsb_he,
                  results, agents, configs, V0):
     """
-    Three-panel figure (1 x 3):
-      [0] RL Hedge vs BLS Delta  -- hedge ratio vs moneyness at fixed TTM
-      [1] Hedge-cost counts      -- histogram of absolute hedge costs
-      [2] Hedging-error progress -- mean |HE_t| over time
+    Produce four separate figures, each saved as its own PNG so they can be
+    downloaded individually:
+
+      fig_ql_hedge_ratio.png   — QL  hedge ratio vs moneyness (ATM/Sell/Buy)
+      fig_dql_hedge_ratio.png  — DQL hedge ratio vs moneyness (ATM/Sell/Buy)
+      fig_hedge_costs.png      — QL + DQL vs BLS hedge-cost count histogram
+      fig_hedging_error.png    — mean |HE_t| over time, all strategies
     """
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
-    fig.suptitle("RL Hedging  --  APL reward, no warm start",
-                 fontsize=14, fontweight="bold")
+    # ── Figure 1: QL hedge ratio vs moneyness ────────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_hedge_ratio_slice(ax, agents, configs, agent_kind="QHedger",
+                            title_prefix="Q-Learning")
+    fig.tight_layout()
+    fig.savefig("fig_ql_hedge_ratio.png", dpi=150)
+    print("\nSaved fig_ql_hedge_ratio.png")
 
-    palette = ["tomato", "darkorange", "green", "purple",
-               "deeppink", "teal", "brown", "olive"]
+    # ── Figure 2: DQL hedge ratio vs moneyness ───────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_hedge_ratio_slice(ax, agents, configs, agent_kind="DoubleQHedger",
+                            title_prefix="Double Q-Learning")
+    fig.tight_layout()
+    fig.savefig("fig_dql_hedge_ratio.png", dpi=150)
+    print("Saved fig_dql_hedge_ratio.png")
 
-    # Panel 1: Hedge ratio vs moneyness
-    _plot_hedge_ratio_slice(axes[0], agents, configs)
+    # ── Figure 3: Hedge-cost count histogram (QL + DQL vs BLS) ───────────
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_hedge_cost_hist(ax, bs_tc, results)
+    fig.tight_layout()
+    fig.savefig("fig_hedge_costs.png", dpi=150)
+    print("Saved fig_hedge_costs.png")
 
-    # Panel 2: Hedge-cost count histogram
-    _plot_hedge_cost_hist(axes[1], bs_tc, results)
+    # ── Figure 4: Hedging-error progression ──────────────────────────────
+    fig, ax = plt.subplots(figsize=(8, 6))
+    _plot_hedging_error(ax, bs_he, bsb_he, results)
+    fig.tight_layout()
+    fig.savefig("fig_hedging_error.png", dpi=150)
+    print("Saved fig_hedging_error.png")
 
-    # Panel 3: Hedging-error progression
-    ax = axes[2]
-    N = PARAMS["N"]
-    t_axis = np.arange(N + 1) * (PARAMS["T"] / N)
-    ax.plot(t_axis, np.abs(bs_he).mean(axis=0),
-            color="steelblue", lw=2.2, label="BS Delta")
-    ax.plot(t_axis, np.abs(bsb_he).mean(axis=0),
-            color="grey", lw=1.8, linestyle="--", label="BS Band")
-    for (name, res), c in zip(results.items(), palette):
-        ax.plot(t_axis, np.abs(res["he"]).mean(axis=0),
-                color=c, lw=1.4, label=res["label"].strip())
-    ax.set_title("Hedging Error Progression", fontsize=12)
-    ax.set_xlabel("Time  $t$  (years)", fontsize=11)
-    ax.set_ylabel(r"Mean $|HE_t|$", fontsize=11)
-    ax.legend(fontsize=7, loc="upper left")
-    ax.grid(True, alpha=0.25)
-
-    plt.tight_layout()
-    plt.savefig("results.png", dpi=150)
-    print("\nPlot saved to results.png")
     plt.show()
     print("\nDone.")
 
@@ -271,15 +265,23 @@ def _smooth(arr, window=3):
     return np.convolve(padded, kernel, mode="valid")[:len(arr)]
 
 
-def _plot_hedge_ratio_slice(ax, agents, configs):
-    """
-    Hedge ratio vs moneyness at fixed TTM -- mirrors the MATLAB style.
+def _find_agent(agents, configs, agent_kind):
+    """Return the (agent, label) whose class name matches agent_kind."""
+    for ag, cfg in zip(agents, configs):
+        if type(ag).__name__ == agent_kind:
+            return ag, cfg["label"].strip()
+    raise ValueError("No agent of type %s found in CONFIGS" % agent_kind)
 
-    Improvements over the earlier version:
-      - 400-point M grid so the BLS S-curve is perfectly smooth
+
+def _plot_hedge_ratio_slice(ax, agents, configs, agent_kind, title_prefix):
+    """
+    Hedge ratio vs moneyness at fixed TTM, for one agent type (QL or DQL).
+
+    Mirrors the MATLAB style:
+      - 400-point M grid so the BLS S-curve is smooth
       - RL curves smoothed with a moving average to remove grid-step artefacts
-      - Heavier lines and clean colours (blue / red / green / purple)
-      - Best QL agent selected by lowest mean TC (not hard-coded by name)
+      - Heavy lines, clean colours (blue / red / green / purple)
+      - ATM / Selling (mR+0.1) / Buying (mR-0.1) RL curves
     """
     K     = PARAMS["K"]
     r     = PARAMS["r"]
@@ -287,28 +289,21 @@ def _plot_hedge_ratio_slice(ax, agents, configs):
     tau   = TTM_SLICE
 
     m_fine = np.linspace(M_GRID[0], M_GRID[-1], 400)
-    win    = max(3, len(m_fine) // 30)   # ~1/30 of the grid width
+    win    = max(3, len(m_fine) // 30)
 
-    # Pick QL_c00 agent (or first QL if not present)
-    best_idx = 0
-    for i, cfg in enumerate(configs):
-        if cfg["name"] == "QL_c00":
-            best_idx = i
-            break
-    best_agent = agents[best_idx]
-    best_label = configs[best_idx]["label"].strip()
+    agent, label = _find_agent(agents, configs, agent_kind)
 
-    # BLS delta -- exact analytical curve
+    # BLS delta — exact analytical S-curve
     bls = np.array([bs_delta(mR * K, K, tau, r, sigma) for mR in m_fine])
     ax.plot(m_fine, bls, color="steelblue", lw=2.5,
             label="Theoretical BLS Delta")
 
-    # RL curves -- query policy then smooth to reduce state-grid steps
-    rl_atm     = _smooth(np.array([rl_hedge_ratio(best_agent, mR * K,
+    # RL curves — query policy then smooth
+    rl_atm     = _smooth(np.array([rl_hedge_ratio(agent, mR * K,
                           K, tau, PARAMS) for mR in m_fine]), win)
-    rl_selling = _smooth(np.array([rl_hedge_ratio(best_agent, (mR + 0.1) * K,
+    rl_selling = _smooth(np.array([rl_hedge_ratio(agent, (mR + 0.1) * K,
                           K, tau, PARAMS) for mR in m_fine]), win)
-    rl_buying  = _smooth(np.array([rl_hedge_ratio(best_agent, (mR - 0.1) * K,
+    rl_buying  = _smooth(np.array([rl_hedge_ratio(agent, (mR - 0.1) * K,
                           K, tau, PARAMS) for mR in m_fine]), win)
 
     ax.plot(m_fine, rl_atm,     color="tomato",       lw=2.2,
@@ -320,7 +315,8 @@ def _plot_hedge_ratio_slice(ax, agents, configs):
 
     ax.set_xlabel("Moneyness", fontsize=11)
     ax.set_ylabel("Hedge Ratio", fontsize=11)
-    ax.set_title("RL Hedge vs. BLS Delta  (TTM = %.3f yr)" % tau, fontsize=12)
+    ax.set_title("%s Hedge vs. BLS Delta  (TTM = %.3f yr)"
+                 % (title_prefix, tau), fontsize=12)
     ax.set_xlim([m_fine[0], m_fine[-1]])
     ax.set_ylim([-0.02, 1.02])
     ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
@@ -329,32 +325,59 @@ def _plot_hedge_ratio_slice(ax, agents, configs):
 
 def _plot_hedge_cost_hist(ax, bs_tc, results):
     """
-    Hedge-cost count histogram -- mirrors the MATLAB 'RL Hedge Costs vs
-    BLS Hedge Costs' bar chart.
+    Hedge-cost count histogram — mirrors MATLAB's 'RL Hedge Costs vs
+    BLS Hedge Costs' chart, now with BOTH RL agents.
 
-    Shows the best RL agent (lowest mean TC across all configs) vs BS Delta.
-    Y-axis is raw episode count, not density, matching the MATLAB style.
+    Y-axis = number of trials (raw episode count, not density).
+    X-axis = absolute hedge cost.
+    Shows QL, DQL and BS Delta overlaid.
     """
-    best_name, best_res = min(results.items(), key=lambda x: x[1]["tc"].mean())
-    rl_tc  = best_res["tc"]
-    bls_tc = bs_tc
+    # Identify QL and DQL results by name
+    ql_res  = next((r for n, r in results.items() if n == "QL"),  None)
+    dql_res = next((r for n, r in results.items() if n == "DQL"), None)
 
-    all_tc    = np.concatenate([rl_tc, bls_tc])
+    series = [("Theoretical BLS Delta", bs_tc, "steelblue")]
+    if ql_res is not None:
+        series.append(("RL Hedge -- QL",  ql_res["tc"],  "salmon"))
+    if dql_res is not None:
+        series.append(("RL Hedge -- DQL", dql_res["tc"], "mediumseagreen"))
+
+    # Common bin edges across all shown series
+    all_tc    = np.concatenate([s[1] for s in series])
     tc_lo     = np.percentile(all_tc, 0.5)
     tc_hi     = np.percentile(all_tc, 99.5)
-    bin_edges = np.linspace(tc_lo, tc_hi, 26)   # 25 bars -- matches MATLAB look
+    bin_edges = np.linspace(tc_lo, tc_hi, 26)
 
-    ax.hist(rl_tc,  bins=bin_edges, alpha=0.65, color="salmon",
-            label="RL Hedge  (%s)" % best_res["label"].strip(),
-            edgecolor="white", linewidth=0.6)
-    ax.hist(bls_tc, bins=bin_edges, alpha=0.65, color="steelblue",
-            label="Theoretical BLS Delta",
-            edgecolor="white", linewidth=0.6)
+    for label, data, color in series:
+        ax.hist(data, bins=bin_edges, alpha=0.55, color=color,
+                label=label, edgecolor="white", linewidth=0.6)
 
     ax.set_xlabel("Hedging Costs", fontsize=11)
     ax.set_ylabel("Number of Trials", fontsize=11)
     ax.set_title("RL Hedge Costs vs. BLS Hedge Costs", fontsize=12)
     ax.legend(fontsize=9, framealpha=0.9)
+    ax.grid(True, alpha=0.25)
+
+
+def _plot_hedging_error(ax, bs_he, bsb_he, results):
+    """Mean |HE_t| over time for all strategies."""
+    palette = ["tomato", "mediumseagreen", "darkorange", "purple",
+               "deeppink", "teal", "brown", "olive"]
+    N = PARAMS["N"]
+    t_axis = np.arange(N + 1) * (PARAMS["T"] / N)
+
+    ax.plot(t_axis, np.abs(bs_he).mean(axis=0),
+            color="steelblue", lw=2.2, label="BS Delta")
+    ax.plot(t_axis, np.abs(bsb_he).mean(axis=0),
+            color="grey", lw=1.8, linestyle="--", label="BS Band")
+    for (name, res), c in zip(results.items(), palette):
+        ax.plot(t_axis, np.abs(res["he"]).mean(axis=0),
+                color=c, lw=1.6, label=res["label"].strip())
+
+    ax.set_title("Hedging Error Progression", fontsize=12)
+    ax.set_xlabel("Time  $t$  (years)", fontsize=11)
+    ax.set_ylabel(r"Mean $|HE_t|$", fontsize=11)
+    ax.legend(fontsize=9, loc="upper left")
     ax.grid(True, alpha=0.25)
 
 
