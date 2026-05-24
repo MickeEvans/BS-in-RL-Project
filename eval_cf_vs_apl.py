@@ -69,14 +69,8 @@ C_BAND     = 1.0
 
 # CONFIGS — must match main.py exactly (names must line up with saved files)
 CONFIGS = [
-    dict(agent_class=QHedger,       c=0.0, name="QL_c00",  label="QL   c=0.0 "),
-    dict(agent_class=QHedger,       c=0.5, name="QL_c05",  label="QL   c=0.5 "),
-    dict(agent_class=QHedger,       c=1.5, name="QL_c15",  label="QL   c=1.5 "),
-    dict(agent_class=QHedger,       c=2.0, name="QL_c20",  label="QL   c=2.0 "),
-    dict(agent_class=DoubleQHedger, c=0.0, name="DQL_c00", label="DQL  c=0.0 "),
-    dict(agent_class=DoubleQHedger, c=0.5, name="DQL_c05", label="DQL  c=0.5 "),
-    dict(agent_class=DoubleQHedger, c=1.5, name="DQL_c15", label="DQL  c=1.5 "),
-    dict(agent_class=DoubleQHedger, c=2.0, name="DQL_c20", label="DQL  c=2.0 "),
+    dict(agent_class=QHedger,       name="QL",  label="Q-Learning       "),
+    dict(agent_class=DoubleQHedger, name="DQL", label="Double Q-Learning"),
 ]
 
 
