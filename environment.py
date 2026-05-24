@@ -207,8 +207,6 @@ def run_episode(agent, params, eps, alpha, gamma, training=True):
         replication error.
 
     Reward: APL (thesis Eq. 8 with S↔V swap).
-    Training penalty: R_pen = R − c·R²  (Cao variance regulariser, applied
-        only to the TD target; accumulated PnL uses raw R).
     """
     S0    = params["S0"]
     K     = params["K"]
@@ -271,8 +269,7 @@ def run_episode(agent, params, eps, alpha, gamma, training=True):
         if training:
             ti, mi     = encode(tau,     S,     params)
             ti_n, mi_n = encode(tau_new, S_new, params)
-            R_pen      = R - agent.c * R * R          # Cao c·R² shaping
-            agent.update(ti, mi, a, R_pen, ti_n, mi_n, alpha, gamma, done)
+            agent.update(ti, mi, a, R, ti_n, mi_n, alpha, gamma, done)
 
         total_pnl += R
         total_tc  += tc_now
